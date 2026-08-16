@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# os-config .gitignore
+# ---------------------------------------------------------------------------
+
+# 运行日志（lib/log.sh 写入 logs/setup-*.log）
+logs/
+*.log
+
+# npm 安装产物（ai-* 模块 install.sh 在模块目录内执行 npm install 时可能产生）
+node_modules/
+**/node_modules/
+*/node_modules/
+
+# 备份文件（lib/utils.sh backup_file 写入 *.bak.<timestamp>）
+*.bak
+*.bak.*
+
+# 用户私有配置（敏感信息：代理、token、个人偏好等，不进版本库）
+config/user.env
+config/*.local.env
+*.local.env
+
+# 临时/中转文件
+*.tmp
+*.tmp.*
+.*-*
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统 / OS 杂项
+.DS_Store
+Thumbs.db
+
+# Bash / shell 历史
+.bash_history
+.sh_history
