@@ -109,4 +109,26 @@ run_step_verbose "npm install -g $CODEX_PKG@$CODEX_VERSION (registry=$NPM_REGIST
   --fetch-timeout=120000 --fetch-retry-maxtimeout=120000 \
   "$CODEX_PKG@$CODEX_VERSION"
 
-log_ok "codex 模块安装完成"
+# ---------------------------------------------------------------------------
+# 4) 安装自检：npm install 退出码 0 ≠ 命令可用
+#    postinstall 失败 / bin 未链接 / PATH 未含 prefix/bin 都会让命令缺失。
+#    就地跑 codex --version，失败即 exit 1（让 setup_traps 的 ERR trap 回滚）。
+# ---------------------------------------------------------------------------
+CODEX_BIN="${CODEX_BIN:-codex}"
+prefix_bin="$(npm config get prefix 2>/dev/null)/bin"
+if ! cmd_exists "$CODEX_BIN" && [[ ! -x "$prefix_bin/$CODEX_BIN" ]]; then
+  log_error "codex 安装后仍不可用（prefix/bin=$prefix_bin；请检查 PATH）"
+  exit 1
+fi
+PATH="$prefix_bin:$PATH" actual="$(
+  "$CODEX_BIN" --version 2>/dev/null \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+)"
+if [[ -z "$actual" ]]; then
+  log_error "codex --version 无版本输出，安装可能不完整（postinstall 失败？）"
+  exit 1
+fi
+if [[ "$actual" != "$CODEX_VERSION" ]]; then
+  log_warn "codex 实际版本 $actual 与固定版本 $CODEX_VERSION 不一致（仍按成功处理）"
+fi
+log_ok "codex $actual 安装成功（自检通过）"

@@ -117,4 +117,26 @@ run_step_verbose "npm install -g $CLAUDE_CODE_PKG@$CLAUDE_CODE_VERSION (registry
   --fetch-timeout=120000 --fetch-retry-maxtimeout=120000 \
   "$CLAUDE_CODE_PKG@$CLAUDE_CODE_VERSION"
 
-log_ok "claude 模块安装完成"
+# ---------------------------------------------------------------------------
+# 4) 安装自检：npm install 退出码 0 ≠ 命令可用
+#    postinstall 失败 / bin 未链接 / PATH 未含 prefix/bin 都会让命令缺失。
+#    就地跑 claude --version，失败即 exit 1（让 setup_traps 的 ERR trap 回滚）。
+# ---------------------------------------------------------------------------
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+prefix_bin="$(npm config get prefix 2>/dev/null)/bin"
+if ! cmd_exists "$CLAUDE_BIN" && [[ ! -x "$prefix_bin/$CLAUDE_BIN" ]]; then
+  log_error "claude 安装后仍不可用（prefix/bin=$prefix_bin；请检查 PATH）"
+  exit 1
+fi
+PATH="$prefix_bin:$PATH" actual="$(
+  "$CLAUDE_BIN" --version 2>/dev/null \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+)"
+if [[ -z "$actual" ]]; then
+  log_error "claude --version 无版本输出，安装可能不完整（postinstall 失败？）"
+  exit 1
+fi
+if [[ "$actual" != "$CLAUDE_CODE_VERSION" ]]; then
+  log_warn "claude 实际版本 $actual 与固定版本 $CLAUDE_CODE_VERSION 不一致（仍按成功处理）"
+fi
+log_ok "claude $actual 安装成功（自检通过）"

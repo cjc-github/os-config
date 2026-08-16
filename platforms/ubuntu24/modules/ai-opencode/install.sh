@@ -112,4 +112,27 @@ run_step_verbose "npm install -g $OPENCODE_PKG@$OPENCODE_VERSION (registry=$NPM_
   --fetch-timeout=120000 --fetch-retry-maxtimeout=120000 \
   "$OPENCODE_PKG@$OPENCODE_VERSION"
 
-log_ok "opencode 模块安装完成"
+# ---------------------------------------------------------------------------
+# 4) 安装自检：npm install 退出码 0 ≠ 命令可用
+#    postinstall 失败 / bin 未链接 / PATH 未含 prefix/bin 都会让命令缺失。
+#    就地跑 opencode --version，失败即 exit 1（让 setup_traps 的 ERR trap 回滚）。
+# ---------------------------------------------------------------------------
+OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
+prefix_bin="$(npm config get prefix 2>/dev/null)/bin"
+if ! cmd_exists "$OPENCODE_BIN" && [[ ! -x "$prefix_bin/$OPENCODE_BIN" ]]; then
+  log_error "opencode 安装后仍不可用（prefix/bin=$prefix_bin；请检查 PATH）"
+  exit 1
+fi
+# npm 全局 bin 可能不在当前 shell PATH，显式带上 prefix_bin 兜底再取版本
+PATH="$prefix_bin:$PATH" actual="$(
+  "$OPENCODE_BIN" --version 2>/dev/null \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+)"
+if [[ -z "$actual" ]]; then
+  log_error "opencode --version 无版本输出，安装可能不完整（postinstall 失败？）"
+  exit 1
+fi
+if [[ "$actual" != "$OPENCODE_VERSION" ]]; then
+  log_warn "opencode 实际版本 $actual 与固定版本 $OPENCODE_VERSION 不一致（仍按成功处理）"
+fi
+log_ok "opencode $actual 安装成功（自检通过）"
