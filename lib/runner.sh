@@ -17,8 +17,8 @@
 # 模块表（全局关联数组）
 # ---------------------------------------------------------------------------
 
-declare -gA _M_DIR _M_DEPS _M_NEEDS_SUDO
-declare -ga BACKUP_LIST=()
+declare -gA _M_DIR _M_DEPS _M_NEEDS_SUDO _M_DESC _M_STATUS
+declare -ga _M_ORDER=()
 declare -g _OK_COUNT=0 _FAIL_COUNT=0 _VERIFY_FAIL_COUNT=0 _SKIP_COUNT=0
 declare -ga _FAIL_LIST=()        # 安装失败的模块名（D 失败汇总）
 declare -ga _VERIFY_FAIL_LIST=() # 验证失败的模块名
@@ -27,25 +27,39 @@ declare -g __NODE_ACTIVATED=0
 
 # 加载某平台所有模块的元数据
 runner_load_modules() {  # <platform_dir>
-  local pdir="$1" m name deps sudo_flag
-  _M_DIR=(); _M_DEPS=(); _M_NEEDS_SUDO=()
+  local pdir="$1" m name deps sudo_flag desc k v dep
+  _M_DIR=(); _M_DEPS=(); _M_NEEDS_SUDO=(); _M_DESC=(); _M_ORDER=()
   [[ -d "$pdir/modules" ]] || { log_error "平台目录无 modules/：$pdir"; return 1; }
   for m in "$pdir/modules"/*/; do
     [[ -f "$m/module.conf" ]] || continue
-    name=""; deps=""; sudo_flag=0
+    name=""; deps=""; sudo_flag=0; desc=""
     while IFS='=' read -r k v; do
+      v="${v%$'\r'}"
       case "$k" in
         NAME) name="$v" ;;
+        DESC) desc="$v" ;;
         DEPS) deps="$v" ;;
         NEEDS_SUDO) sudo_flag="$v" ;;
       esac
-    done < "$m/module.conf"
-    [[ -n "$name" ]] || { log_warn "跳过无 NAME 的模块目录：$m"; continue; }
-    _M_DIR["$name"]="${m%/}"   # 去掉末尾斜杠，避免后续路径拼接出现 //
+    done <"$m/module.conf"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "非法或缺失的模块 NAME：$m/module.conf（NAME=$name）"; return 1; }
+    [[ -z "${_M_DIR[$name]+x}" ]] || { log_error "模块 NAME 重复：$name（$m 与 ${_M_DIR[$name]}）"; return 1; }
+    [[ "$sudo_flag" == 0 || "$sudo_flag" == 1 ]] || { log_error "模块 $name 的 NEEDS_SUDO 必须是 0 或 1"; return 1; }
+    if [[ -n "$deps" ]]; then
+      IFS=',' read -r -a dep_items <<<"$deps"
+      for dep in "${dep_items[@]}"; do
+        dep="${dep//[[:space:]]/}"
+        [[ -z "$dep" || "$dep" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "模块 $name 含非法依赖名：$dep"; return 1; }
+      done
+    fi
+    _M_DIR["$name"]="${m%/}"
     _M_DEPS["$name"]="$deps"
-    _M_NEEDS_SUDO["$name"]="${sudo_flag:-0}"
+    _M_NEEDS_SUDO["$name"]="$sudo_flag"
+    _M_DESC["$name"]="$desc"
+    _M_ORDER+=("$name")
   done
-  log_debug "已加载 ${#_M_DIR[@]} 个模块：${!_M_DIR[*]}"
+  (( ${#_M_ORDER[@]} > 0 )) || { log_error "平台没有可加载的模块：$pdir"; return 1; }
+  log_debug "已加载 ${#_M_ORDER[@]} 个模块：${_M_ORDER[*]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -134,12 +148,18 @@ runner_run_module() {  # <name>
       log_warn "模块 $name 需要 sudo，已被 --no-sudo 跳过"
       _SKIP_COUNT=$((_SKIP_COUNT + 1))
       _SKIP_LIST+=("$name")
+      _M_STATUS["$name"]="skipped"
       return 0
     fi
     if [[ "${DRY_RUN:-0}" = 1 ]]; then
       log_info "  (dry-run) 模块 $name 需要 sudo"
     else
-      require_sudo || return 1
+      if ! require_sudo; then
+        _FAIL_COUNT=$((_FAIL_COUNT + 1))
+        _FAIL_LIST+=("$name")
+        _M_STATUS["$name"]="failed"
+        return 1
+      fi
     fi
   fi
 
@@ -157,12 +177,13 @@ runner_run_module() {  # <name>
       else
         MODULE_NAME="$name" MODULE_DIR="$mdir" PLATFORM_DIR="${PLATFORM_DIR:-}" \
           FORCE="${FORCE:-0}" DEBUG="${DEBUG:-0}" LOG_FILE="${LOG_FILE:-}" \
-          bash "$mdir/install.sh"
+          BACKUP_MANIFEST="${BACKUP_MANIFEST:-}" bash "$mdir/install.sh"
         rc=$?
         if [[ $rc -ne 0 ]]; then
           log_error "[$name] install 失败 (exit=$rc)"
           _FAIL_COUNT=$((_FAIL_COUNT + 1))
           _FAIL_LIST+=("$name")
+          _M_STATUS["$name"]="failed"
           [[ "${KEEP_GOING:-0}" = 1 ]] && return 0 || return 1
         fi
       fi
@@ -185,6 +206,7 @@ runner_run_module() {  # <name>
           log_error "[$name] verify 失败 (exit=$rc)"
           _VERIFY_FAIL_COUNT=$((_VERIFY_FAIL_COUNT + 1))
           _VERIFY_FAIL_LIST+=("$name")
+          _M_STATUS["$name"]="failed"
           [[ "${KEEP_GOING:-0}" = 1 ]] && return 0 || return 1
         fi
         log_ok "[$name] verify 通过"
@@ -195,6 +217,7 @@ runner_run_module() {  # <name>
   fi
 
   _OK_COUNT=$((_OK_COUNT + 1))
+  _M_STATUS["$name"]="ok"
   return 0
 }
 
@@ -218,10 +241,35 @@ runner_run_modules() {  # <platform_dir> <module_names...>
   log_info "执行计划（${#ordered[@]} 个模块）：${ordered[*]}"
 
   _OK_COUNT=0; _FAIL_COUNT=0; _VERIFY_FAIL_COUNT=0; _SKIP_COUNT=0
-  _FAIL_LIST=(); _VERIFY_FAIL_LIST=(); _SKIP_LIST=()
+  _FAIL_LIST=(); _VERIFY_FAIL_LIST=(); _SKIP_LIST=(); _M_STATUS=()
+  BACKUP_MANIFEST="${LOG_FILE}.backups"
+  : >"$BACKUP_MANIFEST"
+  export BACKUP_MANIFEST
 
-  local rc=0
+  local n dep deps_list blocked_by
+  local -a deps
   for n in "${ordered[@]}"; do
+    blocked_by=""
+    deps_list="${_M_DEPS[$n]:-}"
+    if [[ -n "$deps_list" ]]; then
+      IFS=',' read -r -a deps <<<"$deps_list"
+      for dep in "${deps[@]}"; do
+        dep="${dep//[[:space:]]/}"
+        [[ -z "$dep" ]] && continue
+        if [[ "${_M_STATUS[$dep]:-}" != "ok" ]]; then
+          blocked_by="$dep"
+          break
+        fi
+      done
+    fi
+    if [[ -n "$blocked_by" ]]; then
+      log_section "[$n]"
+      log_warn "模块 $n 因依赖 $blocked_by 状态为 ${_M_STATUS[$blocked_by]:-unknown} 而跳过"
+      _SKIP_COUNT=$((_SKIP_COUNT + 1))
+      _SKIP_LIST+=("$n")
+      _M_STATUS["$n"]="blocked"
+      continue
+    fi
     runner_run_module "$n" || { rc=1; [[ "${KEEP_GOING:-0}" = 1 ]] || break; }
   done
 
@@ -237,10 +285,17 @@ runner_run_modules() {  # <platform_dir> <module_names...>
   if [[ ${#_SKIP_LIST[@]} -gt 0 ]]; then
     log_warn "⊘ 跳过的模块：${_SKIP_LIST[*]}"
   fi
-  if [[ ${#BACKUP_LIST[@]} -gt 0 ]]; then
+  if [[ -s "$BACKUP_MANIFEST" ]]; then
     log_info "本次备份文件："
-    printf '  %s\n' "${BACKUP_LIST[@]}" >&2
+    while IFS= read -r backup; do
+      printf '  %s\n' "$backup" >&2
+    done <"$BACKUP_MANIFEST"
+  else
+    rm -f -- "$BACKUP_MANIFEST"
   fi
   log_info "日志文件：$(log_path)"
-  return $rc
+  if (( _FAIL_COUNT > 0 || _VERIFY_FAIL_COUNT > 0 )); then
+    return 1
+  fi
+  return "$rc"
 }

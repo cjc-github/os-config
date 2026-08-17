@@ -1,68 +1,84 @@
 # os-config
 
-一键初始化当前操作系统的开发环境：识别平台 → 跑模块 → 装 + 验证。
+按操作系统族组织的模块化开发环境初始化脚本：平台识别 → 依赖排序 → 安装 → 验证 → 汇总。
 
-当前支持平台：**ubuntu24**（其它平台 `ubuntu22` / `macos` / `arch` 为占位目录）。
+> 当前实际支持：**Ubuntu 22.04 / 24.04（统一使用 `ubuntu`）**。`windows`、`macos`、`kylin` 为操作系统族占位目录，尚未实现模块；即使通过 `--platform` 强制选择也会明确失败。CPU 架构（如 amd64、arm64）单独识别，不再作为 `platforms/` 下的平台类别。
 
 ## 快速开始
 
 ```bash
-# 1. 配置用户变量（可选；不配也能跑，用默认值）
-cp config/user.env.example config/user.env
-# 编辑 config/user.env：填 GIT_USER_NAME / GIT_USER_EMAIL / PROXY_PORT 等
-
-# 2. 列出可用模块
-./setup.sh --list
-
-# 3. 试跑（不执行任何操作，只打印计划）
-./setup.sh --all --dry-run
-
-# 4. 按配置文件 config/modules.conf 跑（默认启用全部模块）
-./setup.sh
-
-# 5. 或只跑指定模块（自动补依赖）
-./setup.sh --module nodejs,claude
+cp config/user.env.example config/user.env   # 可选：按需修改
+./setup.sh --platform ubuntu --list
+./setup.sh --platform ubuntu --all --dry-run
+./setup.sh                                   # Ubuntu 22.04/24.04 上自动识别为 ubuntu
 ```
+
+常用的定向执行方式：
+
+```bash
+./setup.sh --module nodejs,claude
+./setup.sh --module proxy --force
+./setup.sh --verify-only --module git,ssh
+./tests/run.sh
+```
+
+## 平台分类
+
+`platforms/` 的一级目录按**操作系统族**划分，而不是按发行版版本或 CPU 架构划分：
+
+- Ubuntu 22.04 和 24.04 都映射到 `platforms/ubuntu/`；
+- Windows、macOS、麒麟分别使用 `platforms/windows/`、`platforms/macos/`、`platforms/kylin/`；
+- amd64、arm64 等 CPU 架构记录在 `SYSTEM_ARCH`，由各模块在确有差异时自行选择实现。
+
+## 重要默认值
+
+- `APT_UPGRADE=false`：默认只执行 `apt update` 和安装所需包，不做全系统升级。
+- `GIT_USER_NAME`/`GIT_USER_EMAIL`：任一值留空时，不修改对应的 Git 全局身份配置，并在 warning 中给出 `git config --global user.name "你的姓名"` 或 `git config --global user.email "your-email@example.com"` 命令。
+- `PROXY_ENABLED=true`：默认写入 shell 和 Git 代理配置；`PROXY_HOST` 留空时取当前 IPv4 并只把最后一段替换为 `1`，`PROXY_PORT` 留空时使用 `7890`。写入前会 ping 代理主机；验证阶段还会执行 `curl -x <代理地址> https://github.com`，真实检查代理端口、HTTPS CONNECT 和外网访问。失败时打印网卡/IP、路由、防火墙和代理端口排查说明。设置 `PROXY_ENABLED=false` 可显式关闭。
+- `SSH_INSTALL_SERVER=false`：默认只安装 SSH 客户端，不安装 `openssh-server`。
+- `NODE_VERSION=`：留空时安装 `NODE_LTS_MAJOR` 指定主版本下的最新远端版本；填写完整版本可精确锁定。
+- `MIRROR_SKIP_APT=false`：默认会配置 Ubuntu APT 镜像；不希望改源时请显式设为 `true`。
 
 ## 命令行参数
 
 | 参数 | 说明 |
 |---|---|
-| `./setup.sh` | 按配置文件 `config/modules.conf` 跑 |
-| `--module a,b` | 只跑指定模块（自动补依赖） |
-| `--all` | 跑当前平台全部模块 |
-| `--list` | 列出可用模块（NAME / DEPS / NEEDS_SUDO） |
-| `--dry-run` | 只打印执行计划不执行 |
-| `--install-only` | 只跑 install |
-| `--verify-only` | 只跑 verify |
-| `--force` | 忽略幂等判断强制重装 |
-| `--keep-going` | 遇错不停，跑完再汇总 |
-| `--no-sudo` | 跳过 NEEDS_SUDO 的模块 |
-| `--platform ubuntu24` | 强制指定平台（测试用） |
+| `--module a,b` | 只跑指定模块，并自动补齐依赖 |
+| `--all` | 按稳定的模块顺序跑全部模块 |
+| `--list` | 显示 NAME、目录、依赖、sudo 和描述 |
+| `--dry-run` | 只打印计划，不执行模块脚本 |
+| `--install-only` | 只安装，不验证 |
+| `--verify-only` | 只验证，不安装 |
+| `--force` | 强制重装或重写受管配置 |
+| `--keep-going` | 模块失败后继续跑无关模块；最终仍返回非零 |
+| `--no-sudo` | 跳过 `NEEDS_SUDO=1` 模块，其下游依赖模块会标记 blocked |
+| `--platform ubuntu` | 强制选择操作系统族，主要用于测试 |
 | `--debug` | 打开调试日志 |
-| `-h, --help` | 帮助 |
 
-## 模块清单（ubuntu24）
+`--install-only` 与 `--verify-only`、`--all` 与 `--module` 不能同时使用。
 
-| 模块名 | 目录 | DEPS | NEEDS_SUDO | 作用 |
-|---|---|---|---|---|
-| `mirrors` | `sys-mirrors/` | — | 1 | **第一步先跑**：Ubuntu 24.04 deb822 `ubuntu.sources` 换国内清华源（按 amd64/arm64 区分 ports）→ apt update 验证；支持自定义 MIRROR_APT_URL |
-| `base` | `sys-base/` | mirrors | 1 | `apt update/upgrade` + 基础工具包（curl/wget/ca-cert/gnupg/unzip） |
-| `git` | `net-git/` | base | 1 | 安装 git + 配置 user.name/email + http/https proxy |
-| `ssh` | `net-ssh/` | base | 1 | openssh + 非交互生成 ed25519 密钥 |
-| `proxy` | `net-proxy/` | base | 0 | shell 环境变量代理（写入 `~/.bashrc` 标记块） |
-| `nodejs` | `rt-nodejs/` | base | 0 | nvm + node LTS + npm registry 镜像（npmmirror）+ `prefer-offline/no-audit/no-fund` 提速 |
-| `log` | `rt-log/` | base | 1 | lnav/bat + journald 持久化 + logrotate + `oslogs` 别名 |
-| `screen` | `rt-screen/` | base | 0 | 关闭息屏/锁屏（gsettings → xset → Server 跳过） |
-| `claude` | `ai-claude/` | nodejs | 0 | `@anthropic-ai/claude-code` CLI（npm ENOTEMPTY 自动清理旧目录） |
-| `codex` | `ai-codex/` | nodejs | 0 | `@openai/codex` CLI（npm ENOTEMPTY 自动清理旧目录） |
-| `opencode` | `ai-opencode/` | nodejs | 0 | `opencode-ai` CLI（npm ENOTEMPTY 自动清理旧目录；包名 opencode-ai，不是 opencode） |
+## 模块清单
 
-依赖链：
+| NAME | 目录 | 依赖 | sudo | 作用 |
+|---|---|---|---:|---|
+| `mirrors` | `sys-mirrors` | — | 1 | 配置 Ubuntu deb822/legacy APT 镜像并验证 |
+| `base` | `sys-base` | mirrors | 1 | apt update、可选 upgrade、安装基础工具（含 ping） |
+| `git` | `net-git` | base | 1 | 安装 Git；空身份 warning 后跳过；代理推导、ping，并用 curl 验证 GitHub 访问 |
+| `ssh` | `net-ssh` | base | 1 | 安装客户端、生成密钥；服务端为可选项 |
+| `proxy` | `net-proxy` | base | 0 | 推导并 ping 代理主机，写入代理变量并用 curl 验证 GitHub 访问 |
+| `nodejs` | `rt-nodejs` | base | 0 | 安装 nvm 和指定 Node 主版本/完整版本 |
+| `log` | `rt-log` | base | 1 | 日志工具、journald drop-in、logrotate 校验、别名 |
+| `screen` | `rt-screen` | base | 0 | 配置并验证 GNOME 或 X11 的息屏/锁屏策略 |
+| `claude` | `ai-claude` | nodejs | 0 | 安装固定版本 Claude Code CLI |
+| `codex` | `ai-codex` | nodejs | 0 | 安装固定版本 Codex CLI |
+| `opencode` | `ai-opencode` | nodejs | 0 | 安装固定版本 OpenCode CLI |
 
-```
-mirrors → base ─┬─ git ── proxy
+依赖关系：
+
+```text
+mirrors → base ─┬─ git
                 ├─ ssh
+                ├─ proxy
                 ├─ nodejs ─┬─ claude
                 │          ├─ codex
                 │          └─ opencode
@@ -70,76 +86,36 @@ mirrors → base ─┬─ git ── proxy
                 └─ screen
 ```
 
+## 安全性与失败处理
+
+- 需要 sudo 时，交互终端会执行 `sudo -v`；非交互环境需预先准备 sudo 凭据。
+- 受管文件修改前会注册回滚：原文件存在则备份，原文件不存在则在失败时删除新建文件。
+- 系统文件使用 sudo 模式备份和恢复；本次备份清单会写入运行日志旁的 manifest。
+- 日志目录/文件权限尽量收紧为 `700/600`，token、密码、Bearer Authorization 和 URL 凭据会在落盘前脱敏。
+- npm 全局安装首次正常执行；只有确认错误包含 `ENOTEMPTY` 时，才删除 npm 的隐藏 rename 残留并重试，不删除正式包目录。
+- `--keep-going` 只允许无关模块继续；依赖失败的模块会 blocked，整个命令最终返回非零。
+
 ## 目录结构
 
+```text
+setup.sh                 唯一入口
+config/                  模块清单、版本与用户配置
+lib/                     日志、平台识别、runner、公共工具
+platforms/ubuntu/        Ubuntu 22.04/24.04 共用的 11 个模块
+platforms/windows/       Windows 占位目录
+platforms/macos/         macOS 占位目录
+platforms/kylin/         麒麟操作系统占位目录
+tests/run.sh             不依赖 Bats 的快速回归测试
+docs/DESIGN.md           详细设计
+logs/                    运行时日志（已被 .gitignore 忽略）
 ```
-os-config/
-├── setup.sh                       # 唯一入口
-├── README.md                       # 本文件
-├── docs/
-│   └── DESIGN.md                   # 详细设计文档（推荐阅读）
-├── lib/                           # 共享库（平台无关）
-│   ├── log.sh                      # 彩色输出 + 落盘日志（含脱敏）
-│   ├── platform.sh                 # 平台识别
-│   ├── runner.sh                   # 模块加载、拓扑排序、nvm 注入、install/verify 调度
-│   └── utils.sh                    # 幂等判断、备份、确认、命令运行
-├── config/
-│   ├── modules.conf                # 启用的模块清单
-│   ├── versions.env                # 固定版本号（占位，需按 §八流程实查锁定）
-│   └── user.env.example            # 用户可覆盖变量（复制为 user.env 生效）
-├── platforms/
-│   ├── ubuntu24/                   # 已实现
-│   │   ├── detect.sh
-│   │   └── modules/<prefix>-<name>/
-│   │       ├── module.conf         # NAME / DEPS / NEEDS_SUDO
-│   │       ├── install.sh          # 安装/配置
-│   │       └── verify.sh           # 验证（退出码即结论）
-│   ├── ubuntu22/                   # 占位
-│   ├── macos/                      # 占位
-│   └── arch/                       # 占位
-└── logs/                          # 运行时自动生成
-```
-
-模块目录前缀（`sys-` / `net-` / `rt-` / `ai-`）只影响视觉顺序，对运行逻辑透明；CLI 和 `modules.conf` 里都用不带前缀的 `NAME`。
-
-## 设计要点
-
-- **平台优先**：主脚本先识别平台再加载模块集
-- **模块化 + 配置驱动**：每个功能是独立模块；`modules.conf` 勾选启用
-- **每个模块 = 安装 + 验证**：`install.sh` 做，`verify.sh` 验证
-- **权限模型**：`apt` 加 `sudo`；nvm/npm/git 不加；`--no-sudo` 跳过 NEEDS_SUDO 模块
-- **nvm 注入**：runner 在调用 `DEPS=nodejs` 的模块前自动 `source nvm.sh + nvm use default`
-- **幂等 + 可重入**：安装型 `command -v` 判断；配置型 grep 标记块 + 值比较；`--force` 强制重装
-- **回滚**：改 dotfiles 前自动备份成 `.bashrc.bak.<ts>`
-- **固定版本**：所有可装软件的版本号集中在 `config/versions.env`
-- **日志**：终端带色输出 + 落盘到 `logs/`（脱敏 token/password/api_key）
-
-更多细节（权限策略 / nvm PATH 注入 / 版本锁定流程 / 回滚 / 自测方案）见：
-
-> 📄 **[docs/DESIGN.md](docs/DESIGN.md)** —— 完整设计文档
 
 ## 自测
 
 ```bash
-# 静态检查
-bash -n setup.sh lib/*.sh platforms/ubuntu24/detect.sh platforms/ubuntu24/modules/*/*.sh
-
-# 计划预览（不执行）
-./setup.sh --all --dry-run
-
-# 隔离 HOME 跑不需要 sudo 的模块（不污染真实 .bashrc）
-TMPHOME=$(mktemp -d) && cp ~/.bashrc "$TMPHOME/.bashrc"
-HOME="$TMPHOME" ./setup.sh --module proxy --no-sudo
-rm -rf "$TMPHOME"
-
-# docker 容器全流程复跑
-docker run --rm -it -v "$PWD:/os-config" ubuntu:24.04 bash -lc 'cd /os-config && ./setup.sh'
+./tests/run.sh
+find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+./setup.sh --platform ubuntu --all --dry-run
 ```
 
-## 状态
-
-- ✅ Ubuntu 24.04 完整实现（11 模块：mirrors + base + net*3 + rt*3 + ai*3）
-- ✅ 下载提速策略：apt 换清华源（sys-mirrors）+ npm registry npmmirror + prefer-offline/no-audit/no-fund
-- ✅ npm 原子替换失败修复：ai-* 安装前清理 prefix/lib/node_modules 旧目录和 `.xxxx-XXXX` 残留临时目录（ENOTEMPTY）
-- ⏳ `versions.env` 中大部分版本号仍为占位值，需按 [docs/DESIGN.md §八](docs/DESIGN.md) 流程实查锁定（已锁定：opencode-ai=1.18.18）
-- 🚧 其它平台待实现
+自动测试覆盖参数冲突、Ubuntu 22.04/24.04 到 `ubuntu` 的映射、CPU 架构独立识别、拓扑/blocked 状态、keep-going 返回码、元数据重名、日志脱敏、用户与 fake-sudo 回滚、npm `ENOTEMPTY` 修复，Git 空身份 warning，以及代理地址自动推导、默认端口、ping 连通性、`curl -x` 访问 GitHub、失败诊断和安全写入。

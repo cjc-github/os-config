@@ -87,26 +87,150 @@ file_contains() { grep -qE "$2" "$1" 2>/dev/null; }
 # git_cfg_get <key> —— 读 git 全局配置值（无则空）
 git_cfg_get() { git config --global --get "$1" 2>/dev/null; }
 
-# ---------------------------------------------------------------------------
-# 备份（改 dotfiles 前调用）
-# ---------------------------------------------------------------------------
+# validate_ipv4 <address> —— 严格校验点分十进制 IPv4 地址
+validate_ipv4() {
+  local ip="${1:-}" octet
+  local -a octets
 
-# backup_file <path> —— cp 成 <path>.bak.<ts>，幂等（已存在 .bak 同时间戳则不覆盖）
-backup_file() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  local ts; ts=$(date +%Y%m%d-%H%M%S)
-  local bak="${f}.bak.${ts}"
-  if [[ -e "$bak" ]]; then
-    log_warn "备份已存在，跳过：$bak"
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  IFS=. read -r -a octets <<<"$ip"
+  [[ ${#octets[@]} -eq 4 ]] || return 1
+  for octet in "${octets[@]}"; do
+    (( 10#$octet >= 0 && 10#$octet <= 255 )) || return 1
+  done
+}
+
+# detect_primary_ipv4 —— 获取默认路由使用的本机 IPv4；失败时回退到首个非 loopback IPv4
+detect_primary_ipv4() {
+  local addr=""
+
+  if cmd_exists ip; then
+    addr=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{
+      for (i = 1; i <= NF; i++) {
+        if ($i == "src" && (i + 1) <= NF) {
+          print $(i + 1)
+          exit
+        }
+      }
+    }')
+  fi
+
+  if [[ -z "$addr" ]] && cmd_exists hostname; then
+    addr=$(hostname -I 2>/dev/null | tr ' ' '\n' \
+      | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $0 !~ /^127\./ { print; exit }')
+  fi
+
+  validate_ipv4 "$addr" || return 1
+  printf '%s\n' "$addr"
+}
+
+# resolve_proxy_endpoint —— 解析代理端点。
+# PROXY_HOST 为空：将当前 IPv4 的最后一段替换为 1；PROXY_PORT 为空：使用 7890。
+# 成功后设置 RESOLVED_PROXY_HOST / RESOLVED_PROXY_PORT / RESOLVED_PROXY_URL；
+# 自动推导 host 时还会设置 PROXY_SOURCE_IP。
+resolve_proxy_endpoint() {
+  local host="${PROXY_HOST:-}" port="${PROXY_PORT:-}" current_ip=""
+
+  PROXY_SOURCE_IP=""
+  if [[ -z "$host" ]]; then
+    current_ip=$(detect_primary_ipv4) || return 1
+    host="${current_ip%.*}.1"
+    PROXY_SOURCE_IP="$current_ip"
+  fi
+  [[ -n "$port" ]] || port=7890
+
+  [[ "$port" =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || return 2
+  [[ "$host" != -* && "$host" =~ ^([A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\])$ ]] || return 3
+
+  RESOLVED_PROXY_HOST="$host"
+  RESOLVED_PROXY_PORT="$port"
+  RESOLVED_PROXY_URL="http://${host}:${port}"
+}
+
+# check_proxy_host_reachable <host> —— 使用 ICMP ping 检查代理主机是否可达。
+# 返回值：0=可达，1=不可达，2=缺少 ping 命令。
+check_proxy_host_reachable() {
+  local host="${1:-}" target
+  [[ -n "$host" ]] || return 1
+  cmd_exists ping || return 2
+
+  # ping 接受裸 IPv6 地址，而代理 URL 中的 IPv6 host 需要方括号。
+  target="${host#[}"
+  target="${target%]}"
+  if ping -n -c 1 -W 2 -- "$target" >/dev/null 2>&1; then
     return 0
   fi
-  cp -p "$f" "$bak" || { log_error "备份失败：$f"; return 1; }
-  log_info "已备份：$f -> $bak"
-  # 把备份路径写进本次日志摘要（runner 提供 BACKUPS 列表变量）
-  if [[ -n "${BACKUP_LIST-}" ]]; then
-    BACKUP_LIST+=("$bak")
+  return 1
+}
+
+# log_proxy_connectivity_diagnostics <host> <port> [source-ip]
+# ping 失败时输出固定的两步排查说明。调用前须已加载 lib/log.sh。
+log_proxy_connectivity_diagnostics() {
+  local host="${1:-<未知>}" port="${2:-7890}" source_ip="${3:-}" target
+  target="${host#[}"
+  target="${target%]}"
+
+  log_error "代理主机 $host ping 不通，请按以下步骤检查："
+  log_error "1、先确认本机 IP 和网卡是否正确："
+  log_error "   执行：ip -4 addr show"
+  log_error "   执行：ip route get $target"
+  if [[ -n "$source_ip" ]]; then
+    log_error "   预期路由输出中的 src 为 $source_ip，并确认对应网卡处于 UP 状态。"
+  else
+    log_error "   确认路由输出中的 src 是当前主机实际 IPv4，并确认对应网卡处于 UP 状态。"
   fi
+  log_error "2、检查代理主机 $host 是否开启防火墙或拦截 ICMP："
+  log_error "   Linux：sudo ufw status verbose；sudo nft list ruleset"
+  log_error "   Windows PowerShell：Get-NetFirewallProfile"
+  log_error "   确认允许 ICMP Echo，并放行代理 TCP 端口 $port。"
+}
+
+# ensure_proxy_host_reachable <host> <port> [source-ip]
+# 统一执行 ping 并打印结果；失败时输出诊断步骤。
+ensure_proxy_host_reachable() {
+  local host="${1:-}" port="${2:-7890}" source_ip="${3:-}" rc
+
+  if check_proxy_host_reachable "$host"; then
+    log_ok "代理主机连通性正常：ping $host"
+    return 0
+  else
+    rc=$?
+  fi
+
+  if [[ $rc -eq 2 ]]; then
+    log_error "缺少 ping 命令，无法检查代理主机连通性；请安装 iputils-ping"
+  fi
+  log_proxy_connectivity_diagnostics "$host" "$port" "$source_ip"
+  return 1
+}
+
+# ensure_proxy_curl_connectivity <proxy-url> [test-url] [connect-timeout] [max-time]
+# 使用显式 curl -x 请求验证代理端口、HTTP CONNECT、TLS 和目标站点访问能力。
+ensure_proxy_curl_connectivity() {
+  local proxy_url="${1:-}" test_url="${2:-https://github.com}"
+  local connect_timeout="${3:-5}" max_time="${4:-15}"
+
+  if ! cmd_exists curl; then
+    log_error "缺少 curl 命令，无法执行代理真实访问验证"
+    return 1
+  fi
+  if [[ -z "$proxy_url" || ! "$connect_timeout" =~ ^[1-9][0-9]*$ || ! "$max_time" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "curl 代理验证参数无效（proxy=${proxy_url:-<空>} connect-timeout=$connect_timeout max-time=$max_time）"
+    return 1
+  fi
+
+  log_info "使用 curl 通过代理访问：$test_url"
+  log_command "curl -x $proxy_url $test_url"
+  if curl -fsSL -x "$proxy_url" \
+      --connect-timeout "$connect_timeout" --max-time "$max_time" \
+      -o /dev/null -- "$test_url"; then
+    log_ok "curl 代理访问验证通过：$test_url"
+    return 0
+  fi
+
+  log_error "curl 代理访问验证失败：无法通过 $proxy_url 访问 $test_url"
+  log_error "请检查代理程序是否监听对应端口、代理主机防火墙，以及代理是否允许 HTTPS CONNECT。"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -143,29 +267,146 @@ run_step() {
 # 注意：用 PIPESTATUS[0] 取原命令退出码，避免被 tee 影响判断
 run_step_verbose() {
   local desc="$1"; shift
+  local rc log_target="${LOG_FILE:-/dev/null}"
   log_info "  ▸ $desc"
-  "$@" 2>&1 | tee -a "${LOG_FILE:-/dev/null}" >&2
-  local rc=${PIPESTATUS[0]}
+
+  # 放在 if 条件中，避免调用方启用 set -e/pipefail 时在读取 PIPESTATUS 前退出。
+  # 终端保留原始进度，落盘内容统一经过 _redact 脱敏。
+  if "$@" 2>&1 | tee >(_redact >>"$log_target") >&2; then
+    rc=${PIPESTATUS[0]}
+  else
+    rc=${PIPESTATUS[0]}
+  fi
+
   if [[ $rc -eq 0 ]]; then
     log_ok "  ✓ $desc"
-    return 0
   else
     log_error "  ✗ $desc (exit=$rc)"
-    return $rc
   fi
+  return "$rc"
+}
+
+
+# ---------------------------------------------------------------------------
+# Node.js / npm 公共工具
+# ---------------------------------------------------------------------------
+
+# activate_nvm_default —— nvm 存在时始终激活 default，避免系统 node 抢占 PATH。
+activate_nvm_default() {
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    # shellcheck disable=SC1090
+    . "$NVM_DIR/nvm.sh"
+    nvm use --silent default >/dev/null 2>&1 || return 1
+  fi
+  cmd_exists node && cmd_exists npm
+}
+
+# resolve_command_path <bin> [fallback_dir] —— 输出可执行文件绝对路径。
+resolve_command_path() {
+  local bin="$1" fallback_dir="${2:-}"
+  if cmd_exists "$bin"; then
+    command -v "$bin"
+  elif [[ -n "$fallback_dir" && -x "$fallback_dir/$bin" ]]; then
+    printf '%s\n' "$fallback_dir/$bin"
+  else
+    return 1
+  fi
+}
+
+# run_step_verbose_capture <desc> <capture_file> <cmd...>
+# 与 run_step_verbose 相同，同时将原始输出暂存到权限 600 的临时文件供错误分类。
+run_step_verbose_capture() {
+  local desc="$1" capture_file="$2"; shift 2
+  local rc log_target="${LOG_FILE:-/dev/null}"
+  : >"$capture_file"
+  chmod 600 -- "$capture_file" 2>/dev/null || true
+  log_info "  ▸ $desc"
+  if "$@" 2>&1 | tee "$capture_file" >(_redact >>"$log_target") >&2; then
+    rc=${PIPESTATUS[0]}
+  else
+    rc=${PIPESTATUS[0]}
+  fi
+  if [[ $rc -eq 0 ]]; then
+    log_ok "  ✓ $desc"
+  else
+    log_error "  ✗ $desc (exit=$rc)"
+  fi
+  return "$rc"
+}
+
+# cleanup_npm_enotempty_residue <pkg> —— 只删除 npm rename 遗留的隐藏目录，不删除正式包。
+cleanup_npm_enotempty_residue() {
+  local pkg="$1" prefix nm_dir parent base d
+  prefix=$(npm config get prefix 2>/dev/null || true)
+  [[ -n "$prefix" && "$prefix" != "undefined" ]] || return 1
+  nm_dir="$prefix/lib/node_modules"
+  if [[ "$pkg" == @*/* ]]; then
+    parent="$nm_dir/${pkg%%/*}"
+    base="${pkg##*/}"
+  else
+    parent="$nm_dir"
+    base="$pkg"
+  fi
+  [[ -d "$parent" ]] || return 0
+
+  local restore_nullglob=0
+  shopt -q nullglob || restore_nullglob=1
+  shopt -s nullglob
+  for d in "$parent"/."$base"-*; do
+    [[ -d "$d" ]] || continue
+    log_warn "清理 npm ENOTEMPTY 残留目录：$d"
+    rm -rf -- "$d"
+  done
+  (( restore_nullglob == 0 )) || shopt -u nullglob
+}
+
+# npm_install_global_fixed <pkg> <version> <registry>
+# 第一次正常安装；仅在确认 ENOTEMPTY 后清理隐藏残留并重试一次。
+npm_install_global_fixed() {
+  local pkg="$1" version="$2" registry="${3:-}"
+  local capture rc desc
+  local -a cmd=(npm install -g --loglevel=info --foreground-scripts
+    --no-audit --no-fund --prefer-offline
+    --fetch-timeout=120000 --fetch-retry-maxtimeout=120000)
+  [[ -z "$registry" ]] || cmd+=(--registry="$registry")
+  cmd+=("$pkg@$version")
+  desc="npm install -g $pkg@$version"
+  [[ -z "$registry" ]] || desc+=" (registry=$registry)"
+
+  capture=$(mktemp)
+  register_tmpfile "$capture"
+  if run_step_verbose_capture "$desc" "$capture" "${cmd[@]}"; then
+    return 0
+  else
+    rc=$?
+  fi
+
+  if grep -q 'ENOTEMPTY' "$capture"; then
+    log_warn "检测到 npm ENOTEMPTY，清理隐藏残留后重试一次"
+    cleanup_npm_enotempty_residue "$pkg" || true
+    run_step_verbose "$desc（ENOTEMPTY 修复重试）" "${cmd[@]}"
+    return $?
+  fi
+  return "$rc"
 }
 
 # ---------------------------------------------------------------------------
 # sudo 检测
 # ---------------------------------------------------------------------------
 
-# sudo_available —— 当前能否免密 sudo
-sudo_available() { sudo -n true 2>/dev/null; }
+# sudo_available —— 当前是否已有可用的 sudo 凭据（不弹密码提示）。
+sudo_available() { cmd_exists sudo && sudo -n true 2>/dev/null; }
 
-# require_sudo —— 模块标记 NEEDS_SUDO=1 时 runner 调用，不行就报错
+# require_sudo —— 交互终端允许 sudo -v 获取凭据；非交互环境必须已有凭据。
 require_sudo() {
-  if sudo_available; then return 0; fi
-  log_error "需要 sudo 权限但当前不可用（请配置免密 sudo 或用 --no-sudo 跳过 NEEDS_SUDO 模块）"
+  cmd_exists sudo || { log_error "系统未安装 sudo"; return 1; }
+  sudo_available && return 0
+  if [[ -t 0 && -t 1 ]]; then
+    log_info "需要 sudo 权限，请按提示输入密码"
+    sudo -v && return 0
+  fi
+  log_error "sudo 凭据不可用；非交互运行请预先执行 sudo -v，或用 --no-sudo 跳过特权模块"
   return 1
 }
 
@@ -183,8 +424,12 @@ require_sudo() {
 
 # 全局状态（每个 install.sh 子进程独立维护）
 declare -ga _TMPFILES=()           # 临时文件路径列表
-declare -ga _ROLLBACK_PAIRS=()     # "原文件|备份文件" 列表
+declare -ga _ROLLBACK_ORIG=()      # 原文件路径
+declare -ga _ROLLBACK_BACKUP=()    # 备份文件路径
+declare -ga _ROLLBACK_MODE=()      # user | sudo
+declare -ga _ROLLBACK_EXISTED=()   # 1=原文件存在；0=本次将创建，失败时删除
 declare -g  _TRAPS_SET=0           # 防止重复设 trap
+declare -g  _ROLLBACK_DONE=0       # 防止信号 trap + EXIT trap 重复回滚
 
 # ---------------------------------------------------------------------------
 # A. 临时文件注册与清理
@@ -209,27 +454,50 @@ cleanup_tmpfiles() {
 # F + H. 备份并注册回滚（替代旧 backup_file；失败时让调用方决定）
 # ---------------------------------------------------------------------------
 
-# register_rollback <file>  —— 备份成 .bak.<ts> 并注册到回滚列表
-#   失败时返回 1（不静默吞错，让调用方决定是 abort 还是 continue）
+# register_rollback <file> [user|sudo] —— 注册文件回滚点。
+#   原文件存在：创建 .bak 备份，失败时恢复。
+#   原文件不存在：记录为“本次新建”，失败时删除新文件。
+#   失败时返回非 0，不静默吞错。
 register_rollback() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  local ts; ts=$(date +%Y%m%d-%H%M%S)
-  local bak="${f}.bak.${ts}"
-  if [[ -e "$bak" ]]; then
-    log_warn "备份已存在，跳过：$bak"
-    return 0
+  local f="$1" mode="${2:-user}" existed=0 bak=""
+  [[ "$mode" == "user" || "$mode" == "sudo" ]] || {
+    log_error "未知备份模式：$mode（仅支持 user/sudo）"
+    return 2
+  }
+
+  if [[ "$mode" == "sudo" ]]; then
+    sudo test -e "$f" && existed=1
+  else
+    [[ -e "$f" ]] && existed=1
   fi
-  if cp -p "$f" "$bak" 2>/dev/null; then
-    _ROLLBACK_PAIRS+=("$f|$bak")
+
+  if [[ "$existed" == 1 ]]; then
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    bak="${f}.bak.${ts}.$$"
+    if [[ "$mode" == "sudo" ]]; then
+      sudo cp -p -- "$f" "$bak" 2>/dev/null || {
+        log_error "备份失败：$f（sudo 权限、磁盘空间或只读文件系统）"
+        return 1
+      }
+    else
+      cp -p -- "$f" "$bak" 2>/dev/null || {
+        log_error "备份失败：$f（权限、磁盘空间或只读文件系统）"
+        return 1
+      }
+    fi
+    [[ -z "${BACKUP_MANIFEST:-}" ]] || printf '%s\n' "$bak" >>"$BACKUP_MANIFEST"
     log_info "已备份：$f -> $bak"
-    return 0
+  else
+    log_debug "已注册新文件回滚：$f"
   fi
-  log_error "备份失败：$f（可能权限/磁盘满）"
-  return 1
+
+  _ROLLBACK_ORIG+=("$f")
+  _ROLLBACK_BACKUP+=("$bak")
+  _ROLLBACK_MODE+=("$mode")
+  _ROLLBACK_EXISTED+=("$existed")
 }
 
-# backup_file —— 旧函数保留（保持向后兼容），内部转调 register_rollback
 backup_file() { register_rollback "$@"; }
 
 # ---------------------------------------------------------------------------
@@ -239,27 +507,40 @@ backup_file() { register_rollback "$@"; }
 # rollback_on_exit <exit_code>  —— trap EXIT 调用；rc != 0 时恢复备份
 rollback_on_exit() {
   local rc=${1:-$?}
+  [[ "$_ROLLBACK_DONE" == 1 ]] && return 0
+  _ROLLBACK_DONE=1
   cleanup_tmpfiles
-  if [[ $rc -eq 0 ]]; then
+  if [[ $rc -eq 0 || ${#_ROLLBACK_ORIG[@]} -eq 0 ]]; then
     return 0
   fi
-  if [[ ${#_ROLLBACK_PAIRS[@]} -eq 0 ]]; then
-    return 0
-  fi
+
   log_error "脚本失败（rc=$rc），回滚以下文件到备份："
-  local pair orig bak
-  for pair in "${_ROLLBACK_PAIRS[@]}"; do
-    orig="${pair%%|*}"
-    bak="${pair##*|}"
-    if [[ -f "$bak" ]]; then
-      if cp -p "$bak" "$orig" 2>/dev/null; then
+  local i orig bak mode existed
+  for i in "${!_ROLLBACK_ORIG[@]}"; do
+    orig="${_ROLLBACK_ORIG[$i]}"
+    bak="${_ROLLBACK_BACKUP[$i]}"
+    mode="${_ROLLBACK_MODE[$i]}"
+    existed="${_ROLLBACK_EXISTED[$i]:-1}"
+    if [[ "$existed" == 0 ]]; then
+      if [[ "$mode" == "sudo" ]]; then
+        sudo rm -f -- "$orig" 2>/dev/null || { log_error "  删除新文件失败：$orig"; continue; }
+      else
+        rm -f -- "$orig" 2>/dev/null || { log_error "  删除新文件失败：$orig"; continue; }
+      fi
+      log_info "  已删除失败过程中创建的文件：$orig"
+    elif [[ "$mode" == "sudo" ]]; then
+      if sudo test -f "$bak" && sudo cp -p -- "$bak" "$orig" 2>/dev/null; then
         log_info "  已回滚：$orig <- $bak"
       else
         log_error "  回滚失败：$orig（备份在 $bak，请手动恢复）"
       fi
+    elif [[ -f "$bak" ]] && cp -p -- "$bak" "$orig" 2>/dev/null; then
+      log_info "  已回滚：$orig <- $bak"
+    else
+      log_error "  回滚失败：$orig（备份在 $bak，请手动恢复）"
     fi
   done
-  log_warn "回滚完成。请检查失败原因后重跑（--force 可跳过幂等判断）"
+  log_warn "回滚完成。请检查失败原因后重跑"
 }
 
 # ---------------------------------------------------------------------------
@@ -284,8 +565,8 @@ setup_traps() {
   [[ "$_TRAPS_SET" = 1 ]] && return 0
   _TRAPS_SET=1
   trap 'rollback_on_exit $?' EXIT
-  trap 'log_warn "中断信号收到（$$），清理临时文件并退出"; rollback_on_exit 130; exit 130' INT
-  trap 'log_warn "终止信号收到（$$），清理临时文件并退出"; rollback_on_exit 143; exit 143' TERM
+  trap 'log_warn "中断信号收到（$$），即将清理并退出"; exit 130' INT
+  trap 'log_warn "终止信号收到（$$），即将清理并退出"; exit 143' TERM
   trap 'trap_err_handler' ERR
 }
 

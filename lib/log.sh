@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # log.sh —— 彩色终端输出 + 落盘日志（含脱敏）
-# 由 setup.sh 在最早期 source；提供 log_info / log_ok / log_warn / log_error / log_section。
+# 由 setup.sh 在最早期 source；提供 log_info / log_ok / log_warn / log_error / log_command / log_section。
 # 日志文件路径由 setup.sh 注入到 $LOG_FILE；如未注入则只输出到终端。
 
 # ---------------------------------------------------------------------------
@@ -17,11 +17,18 @@ fi
 
 # 日志文件：若 setup.sh 已注入 $LOG_FILE 则用之；否则 lazy 创建
 _log_file_init() {
-  if [[ -n "${LOG_FILE-}" ]]; then return 0; fi
-  local logdir="$PROJECT_DIR/logs"
-  mkdir -p "$logdir" 2>/dev/null || true
-  LOG_FILE="$logdir/setup-$(date +%Y%m%d-%H%M%S).$$.log"
-  export LOG_FILE
+  local logdir
+  if [[ -z "${LOG_FILE-}" ]]; then
+    logdir="$PROJECT_DIR/logs"
+    LOG_FILE="$logdir/setup-$(date +%Y%m%d-%H%M%S).$$.log"
+    export LOG_FILE
+  else
+    logdir="$(dirname "$LOG_FILE")"
+  fi
+  mkdir -p -- "$logdir"
+  chmod 700 -- "$logdir" 2>/dev/null || true
+  touch -- "$LOG_FILE"
+  chmod 600 -- "$LOG_FILE" 2>/dev/null || true
 }
 _log_file_init
 
@@ -31,7 +38,10 @@ _log_file_init
 # ---------------------------------------------------------------------------
 
 _redact() {
-  sed -E 's/((sk-|token|password|passphrase|api[_-]?key|secret)=)[^[:space:]]+/\1****/gi'
+  sed -E \
+    -e 's/((sk-|token|password|passphrase|api[_-]?key|secret)=)[^[:space:]]+/\1****/gi' \
+    -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]+)[^[:space:]]+/\1****/gi' \
+    -e 's#(https?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1****:****@#g'
 }
 
 # ---------------------------------------------------------------------------
@@ -53,6 +63,15 @@ log_ok()      { _log_emit OK    "$_C_OK"   "$*"; }
 log_warn()    { _log_emit WARN  "$_C_WARN" "$*"; }
 log_error()   { _log_emit ERROR "$_C_ERR"  "$*"; }
 log_debug()   { [[ "${DEBUG:-0}" = 1 ]] || return 0; _log_emit DEBUG "$_C_INFO" "$*"; }
+# 在提示日志下一行与日志正文对齐显示可复制执行的命令，同时以 COMMAND 级别写入日志文件。
+log_command() {
+  local msg="$*" ts
+  ts=$(date '+%H:%M:%S')
+  printf '       %s\n' "$msg" >&2
+  if [[ -n "${LOG_FILE-}" ]]; then
+    printf '[%s] [COMMAND] %s\n' "$ts" "$msg" | _redact >>"$LOG_FILE"
+  fi
+}
 log_section() { printf '\n%s=== %s ===%s\n' "$_C_SECT" "$*" "$_C_RESET" >&2
                 [[ -z "${LOG_FILE-}" ]] || printf '\n=== %s ===\n' "$*" >>"$LOG_FILE"; }
 

@@ -33,6 +33,8 @@ NO_SUDO=0
 DEBUG=${DEBUG:-0}
 PLATFORM_OVERRIDE=""
 MODULES_FROM_CLI=""
+ALL=0
+LIST=0
 
 # ---------------------------------------------------------------------------
 # 用法
@@ -52,7 +54,7 @@ os-config —— 一键初始化当前平台
   ./setup.sh --force                      忽略幂等判断强制重装
   ./setup.sh --keep-going                 遇错不停，跑完再汇总
   ./setup.sh --no-sudo                    跳过 NEEDS_SUDO 的模块
-  ./setup.sh --platform ubuntu24          强制指定平台（测试用）
+  ./setup.sh --platform ubuntu            强制指定操作系统族（测试用）
   ./setup.sh --help                       本帮助
 EOF
 }
@@ -63,7 +65,9 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --module)        MODULES_FROM_CLI="$2"; shift 2 ;;
+    --module)
+      [[ $# -ge 2 && -n "$2" ]] || { log_error "--module 需要一个逗号分隔的模块列表"; exit 2; }
+      MODULES_FROM_CLI="$2"; shift 2 ;;
     --all)           ALL=1; shift ;;
     --list)          LIST=1; shift ;;
     --dry-run)       DRY_RUN=1; shift ;;
@@ -72,15 +76,27 @@ while [[ $# -gt 0 ]]; do
     --force)         FORCE=1; shift ;;
     --keep-going)    KEEP_GOING=1; shift ;;
     --no-sudo)       NO_SUDO=1; shift ;;
-    --platform)      PLATFORM_OVERRIDE="$2"; shift 2 ;;
+    --platform)
+      [[ $# -ge 2 && -n "$2" ]] || { log_error "--platform 需要平台名称"; exit 2; }
+      PLATFORM_OVERRIDE="$2"; shift 2 ;;
     --debug)         DEBUG=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     *)               log_error "未知参数：$1"; usage; exit 2 ;;
   esac
 done
 
-# shellcheck disable=SC2034
-: "${ALL:=0}"; : "${LIST:=0}"
+if [[ "$INSTALL_ONLY" = 1 && "$VERIFY_ONLY" = 1 ]]; then
+  log_error "--install-only 与 --verify-only 不能同时使用"
+  exit 2
+fi
+if [[ "$ALL" = 1 && -n "$MODULES_FROM_CLI" ]]; then
+  log_error "--all 与 --module 不能同时使用"
+  exit 2
+fi
+if [[ -n "$PLATFORM_OVERRIDE" && ! "$PLATFORM_OVERRIDE" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  log_error "非法平台名称：$PLATFORM_OVERRIDE"
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # 平台识别
@@ -99,8 +115,14 @@ else
 fi
 
 PLATFORM_DIR="$PROJECT_DIR/platforms/$PLATFORM"
+SYSTEM_ARCH="$(detect_architecture)"
+export PLATFORM SYSTEM_ARCH
 if [[ ! -d "$PLATFORM_DIR" ]]; then
   log_error "平台目录不存在：$PLATFORM_DIR"
+  exit 1
+fi
+if [[ ! -d "$PLATFORM_DIR/modules" ]] || ! find "$PLATFORM_DIR/modules" -mindepth 2 -maxdepth 2 -type f -name module.conf -print -quit 2>/dev/null | grep -q .; then
+  log_error "平台 $PLATFORM 尚未实现：未找到可用模块"
   exit 1
 fi
 # 平台自检（双保险）
@@ -112,6 +134,7 @@ log_section "os-config"
 log_info "PROJECT_DIR  = $PROJECT_DIR"
 log_info "PLATFORM     = $PLATFORM"
 log_info "PLATFORM_DIR = $PLATFORM_DIR"
+log_info "SYSTEM_ARCH  = $SYSTEM_ARCH"
 log_info "LOG_FILE     = $(log_path)"
 
 # ---------------------------------------------------------------------------
@@ -151,10 +174,10 @@ runner_load_modules "$PLATFORM_DIR" || { log_error "加载模块表失败"; exit
 # ---------------------------------------------------------------------------
 
 if [[ "$LIST" = 1 ]]; then
-  printf '%-12s %-30s %-25s %s\n' "NAME" "DIR" "DEPS" "NEEDS_SUDO"
-  for n in $(printf '%s\n' "${!_M_DIR[@]}" | LC_ALL=C sort); do
-    printf '%-12s %-30s %-25s %s\n' \
-      "$n" "${_M_DIR[$n]#$PROJECT_DIR/}" "${_M_DEPS[$n]:-}" "${_M_NEEDS_SUDO[$n]}"
+  printf '%-12s %-30s %-20s %-5s %s\n' "NAME" "DIR" "DEPS" "SUDO" "DESC"
+  for n in "${_M_ORDER[@]}"; do
+    printf '%-12s %-30s %-20s %-5s %s\n' \
+      "$n" "${_M_DIR[$n]#$PROJECT_DIR/}" "${_M_DEPS[$n]:-}" "${_M_NEEDS_SUDO[$n]}" "${_M_DESC[$n]:-}"
   done
   exit 0
 fi
@@ -167,8 +190,12 @@ declare -a MODULES=()
 
 if [[ -n "$MODULES_FROM_CLI" ]]; then
   IFS=',' read -r -a MODULES <<<"$MODULES_FROM_CLI"
+  for i in "${!MODULES[@]}"; do
+    MODULES[$i]="${MODULES[$i]//[[:space:]]/}"
+    [[ -n "${MODULES[$i]}" ]] || { log_error "--module 中包含空模块名"; exit 2; }
+  done
 elif [[ "${ALL:-0}" = 1 ]]; then
-  for n in "${!_M_DIR[@]}"; do MODULES+=("$n"); done
+  MODULES=("${_M_ORDER[@]}")
 else
   # 读 modules.conf（去掉注释和空行）
   CONF="$PROJECT_DIR/config/modules.conf"
@@ -203,8 +230,11 @@ log_info "启用的模块（${#MODULES[@]}）：${MODULES[*]}"
 # 调度
 # ---------------------------------------------------------------------------
 
-runner_run_modules "$PLATFORM_DIR" "${MODULES[@]}"
-rc=$?
+if runner_run_modules "$PLATFORM_DIR" "${MODULES[@]}"; then
+  rc=0
+else
+  rc=$?
+fi
 
 if [[ $rc -eq 0 ]]; then
   log_ok "全部完成 ✓"

@@ -1,4 +1,5 @@
-# macos
+# macOS
 
-占位目录：尚未实现。如需新增模块，请在此目录下创建 `detect.sh` + `modules/` 结构。
-参考 `../ubuntu24/` 的实现。
+macOS 平台占位目录，目前尚未实现安装模块。
+
+后续应在本目录增加 `detect.sh` 和 `modules/`，模块应使用适合 macOS 的工具和路径，不直接复用 Ubuntu 的 apt/systemd 实现。
