@@ -42,7 +42,16 @@ platforms/
 tests/run.sh
 ```
 
-平台一级目录按操作系统族划分。`SYSTEM_ARCH` 单独记录 CPU 架构（如 `amd64`、`arm64`），不参与平台目录选择。目录前缀 `sys-`、`net-`、`rt-`、`ai-` 只用于模块分类；模块引用使用 `module.conf` 中的 `NAME`。
+平台一级目录按操作系统族划分。`SYSTEM_ARCH` 单独记录 CPU 架构（如 `amd64`、`arm64`），不参与平台目录选择。
+
+模块目录前缀只用于分类：
+
+- `sys-`：系统基础与系统配置；
+- `net-`：网络与连接工具；
+- `rt-`：runtime，运行环境与运行期辅助工具；
+- `ai-`：AI 开发工具。
+
+目录前缀不属于模块名。模块引用和命令行参数始终使用 `module.conf` 中的 `NAME`，例如目录 `rt-log` 的模块名是 `log`，运行命令是 `./setup.sh --module log`。
 
 ## 三、模块契约
 

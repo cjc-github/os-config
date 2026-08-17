@@ -59,6 +59,12 @@ cp config/user.env.example config/user.env   # 可选：按需修改
 
 ## 模块清单
 
+模块目录使用分类前缀：`sys-` 表示系统类、`net-` 表示网络类、`rt-` 表示运行环境类、`ai-` 表示 AI 工具类。前缀只用于整理目录，不属于模块名；执行模块时应使用 `module.conf` 中的 `NAME`。例如 `rt-log` 的实际模块名是 `log`，应执行：
+
+```bash
+./setup.sh --module log
+```
+
 | NAME | 目录 | 依赖 | sudo | 作用 |
 |---|---|---|---:|---|
 | `mirrors` | `sys-mirrors` | — | 1 | 配置 Ubuntu deb822/legacy APT 镜像并验证 |
@@ -67,7 +73,7 @@ cp config/user.env.example config/user.env   # 可选：按需修改
 | `ssh` | `net-ssh` | base | 1 | 安装客户端、生成密钥；服务端为可选项 |
 | `proxy` | `net-proxy` | base | 0 | 推导并 ping 代理主机，写入代理变量并用 curl 验证 GitHub 访问 |
 | `nodejs` | `rt-nodejs` | base | 0 | 安装 nvm 和指定 Node 主版本/完整版本 |
-| `log` | `rt-log` | base | 1 | 日志工具、journald drop-in、logrotate 校验、别名 |
+| `log` | `rt-log` | base | 1 | 安装日志工具，持久化并限容 journald，校验 logrotate，添加 `oslogs` 别名 |
 | `screen` | `rt-screen` | base | 0 | 配置并验证 GNOME 或 X11 的息屏/锁屏策略 |
 | `claude` | `ai-claude` | nodejs | 0 | 安装固定版本 Claude Code CLI |
 | `codex` | `ai-codex` | nodejs | 0 | 安装固定版本 Codex CLI |
