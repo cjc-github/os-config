@@ -235,7 +235,99 @@ CURL
   grep -Fq '放行代理 TCP 端口 7890' <<<"$output"
 }
 
+base_tools_test() {
+  local t="$TMP_ROOT/base-tools" output rc
+  mkdir -p "$t/bin"
+
+  cat >"$t/catalog" <<'CATALOG'
+core|核心依赖|curl|curl|fakecurl|HTTP 客户端
+archive|压缩解压|zip|zip unzip|fakezip fakeunzip|ZIP 工具
+system|系统管理|jq|jq|fakejq|JSON 工具
+CATALOG
+  cat >"$t/config" <<'CONFIG'
+[core]
+enabled=true
+curl=true
+[archive]
+enabled=true
+zip=true
+[system]
+enabled=false
+jq=true
+CONFIG
+
+  (
+    export PROJECT_DIR="$ROOT" LOG_FILE="$t/parser.log"
+    . "$ROOT/lib/log.sh"
+    . "$ROOT/platforms/ubuntu/modules/sys-base/packages.sh"
+    base_load_selection "$ROOT/config/base-tools.conf" \
+      "$ROOT/platforms/ubuntu/modules/sys-base/packages.catalog" || exit
+    (( ${#BASE_SELECTED_TOOLS[@]} > 0 )) || exit 1
+    base_load_selection "$t/config" "$t/catalog" || exit
+    [[ "${BASE_SELECTED_TOOLS[*]}" == 'core.curl archive.zip' ]] || exit 1
+    [[ "${BASE_SELECTED_PACKAGES[*]}" == 'curl zip unzip' ]] || exit 1
+  ) || return
+
+  cat >"$t/invalid.conf" <<'CONFIG'
+[archive]
+enabled=true
+not-a-tool=true
+CONFIG
+  output=$(
+    PROJECT_DIR="$ROOT" LOG_FILE="$t/invalid.log" bash -c '
+      . "$PROJECT_DIR/lib/log.sh"
+      . "$PROJECT_DIR/platforms/ubuntu/modules/sys-base/packages.sh"
+      base_load_selection "$1" "$2"
+    ' _ "$t/invalid.conf" "$t/catalog" 2>&1
+  )
+  rc=$?
+  [[ $rc == 1 ]] || return
+  grep -Fq '基础工具配置包含未知工具' <<<"$output" || return
+
+  cat >"$t/bin/sudo" <<'SUDO'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  [[ "$arg" == fuser ]] && exit 1
+done
+printf '%s\n' "$*" >>"${FAKE_SUDO_LOG:?}"
+SUDO
+  cat >"$t/bin/dpkg-query" <<'DPKG'
+#!/usr/bin/env bash
+package="${!#}"
+if [[ "${FAKE_ALL_INSTALLED:-0}" == 1 || "$package" == curl ]]; then
+  printf '%s\n' 'install ok installed'
+  exit 0
+fi
+exit 1
+DPKG
+  for command_name in fakecurl fakezip fakeunzip; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$t/bin/$command_name"
+  done
+  chmod +x "$t/bin"/*
+
+  : >"$t/sudo.log"
+  PATH="$t/bin:$PATH" PROJECT_DIR="$ROOT" LOG_FILE="$t/install.log" \
+    BASE_TOOLS_CONFIG="$t/config" BASE_TOOLS_CATALOG="$t/catalog" \
+    FAKE_SUDO_LOG="$t/sudo.log" APT_UPGRADE=false \
+    bash "$ROOT/platforms/ubuntu/modules/sys-base/install.sh" >/dev/null 2>&1 || return
+  grep -Fxq 'apt-get update' "$t/sudo.log" || return
+  grep -Fxq 'DEBIAN_FRONTEND=noninteractive apt-get -y install zip unzip' "$t/sudo.log" || return
+  ! grep -Eq 'install .*curl' "$t/sudo.log" || return 1
+
+  : >"$t/sudo.log"
+  PATH="$t/bin:$PATH" PROJECT_DIR="$ROOT" LOG_FILE="$t/force.log" \
+    BASE_TOOLS_CONFIG="$t/config" BASE_TOOLS_CATALOG="$t/catalog" \
+    FAKE_SUDO_LOG="$t/sudo.log" APT_UPGRADE=false \
+    bash "$ROOT/platforms/ubuntu/modules/sys-base/install.sh" --force >/dev/null 2>&1 || return
+  grep -Fxq 'DEBIAN_FRONTEND=noninteractive apt-get -y --reinstall install curl zip unzip' "$t/sudo.log" || return
+
+  PATH="$t/bin:$PATH" PROJECT_DIR="$ROOT" LOG_FILE="$t/verify.log" \
+    BASE_TOOLS_CONFIG="$t/config" BASE_TOOLS_CATALOG="$t/catalog" FAKE_ALL_INSTALLED=1 \
+    bash "$ROOT/platforms/ubuntu/modules/sys-base/verify.sh" >/dev/null 2>&1
+}
+
 run_test '所有 Shell 脚本语法与 diff 格式' syntax_test
+run_test 'sys-base 二维配置、动态安装、force 与验证' base_tools_test
 run_test 'setup 参数冲突与缺值返回 2' args_test
 run_test 'ubuntu dry-run 与未实现平台拦截' dry_run_test
 run_test '操作系统族与 CPU 架构分类' platform_classification_test

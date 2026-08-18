@@ -8,6 +8,7 @@
 
 ```bash
 cp config/user.env.example config/user.env   # 可选：按需修改
+editor config/base-tools.conf                # 选择 sys-base 基础工具
 ./setup.sh --platform ubuntu --list
 ./setup.sh --platform ubuntu --all --dry-run
 ./setup.sh                                   # Ubuntu 22.04/24.04 上自动识别为 ubuntu
@@ -32,6 +33,7 @@ cp config/user.env.example config/user.env   # 可选：按需修改
 
 ## 重要默认值
 
+- `config/base-tools.conf`：按“分类 + 工具”二维选择 `sys-base` 安装的软件；分类 `enabled=false` 时整组跳过。
 - `APT_UPGRADE=false`：默认只执行 `apt update` 和安装所需包，不做全系统升级。
 - `GIT_USER_NAME`/`GIT_USER_EMAIL`：任一值留空时，不修改对应的 Git 全局身份配置，并在 warning 中给出 `git config --global user.name "你的姓名"` 或 `git config --global user.email "your-email@example.com"` 命令。
 - `PROXY_ENABLED=true`：默认写入 shell 和 Git 代理配置；`PROXY_HOST` 留空时取当前 IPv4 并只把最后一段替换为 `1`，`PROXY_PORT` 留空时使用 `7890`。写入前会 ping 代理主机；验证阶段还会执行 `curl -x <代理地址> https://github.com`，真实检查代理端口、HTTPS CONNECT 和外网访问。失败时打印网卡/IP、路由、防火墙和代理端口排查说明。设置 `PROXY_ENABLED=false` 可显式关闭。
@@ -68,7 +70,7 @@ cp config/user.env.example config/user.env   # 可选：按需修改
 | NAME | 目录 | 依赖 | sudo | 作用 |
 |---|---|---|---:|---|
 | `mirrors` | `sys-mirrors` | — | 1 | 配置 Ubuntu deb822/legacy APT 镜像并验证 |
-| `base` | `sys-base` | mirrors | 1 | apt update、可选 upgrade、安装基础工具（含 ping） |
+| `base` | `sys-base` | mirrors | 1 | 按分类/工具二维配置安装基础软件，执行 apt update 和可选 upgrade |
 | `git` | `net-git` | base | 1 | 安装 Git；空身份 warning 后跳过；代理推导、ping，并用 curl 验证 GitHub 访问 |
 | `ssh` | `net-ssh` | base | 1 | 安装客户端、生成密钥；服务端为可选项 |
 | `proxy` | `net-proxy` | base | 0 | 推导并 ping 代理主机，写入代理变量并用 curl 验证 GitHub 访问 |

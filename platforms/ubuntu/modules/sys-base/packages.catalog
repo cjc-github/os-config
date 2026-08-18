@@ -1,0 +1,60 @@
+# sys-base 可选工具目录
+#
+# 格式：
+#   分类标识|分类说明|工具标识|APT 软件包（空格分隔）|验证命令（空格分隔）|工具说明
+#
+# 约束：
+#   - 分类标识和工具标识只能使用小写字母、数字、下划线、连字符；
+#   - 同一分类的“分类说明”必须保持一致；
+#   - 工具使用逻辑名称，APT 软件包和实际命令由本文件统一映射；
+#   - 用户通常只需要修改 config/base-tools.conf，不需要修改本文件。
+
+core|核心依赖|ca-certificates|ca-certificates||HTTPS CA 证书
+core|核心依赖|curl|curl|curl|HTTP/HTTPS 命令行客户端
+core|核心依赖|wget|wget|wget|文件下载工具
+core|核心依赖|gnupg|gnupg|gpg|GPG 密钥与签名工具
+
+file-transfer|文件传输|lrzsz|lrzsz|rz sz|ZMODEM rz/sz 文件传输
+file-transfer|文件传输|rsync|rsync|rsync|增量文件同步
+
+archive|压缩解压|zip|zip|zip|ZIP 压缩
+archive|压缩解压|unzip|unzip|unzip|ZIP 解压
+archive|压缩解压|tar|tar|tar|TAR 归档
+archive|压缩解压|gzip|gzip|gzip|GZIP 压缩解压
+archive|压缩解压|bzip2|bzip2|bzip2|BZIP2 压缩解压
+archive|压缩解压|xz|xz-utils|xz|XZ 压缩解压
+archive|压缩解压|sevenzip|7zip|7z|7-Zip 压缩解压
+archive|压缩解压|rar|unrar-free|unrar-free|RAR 解压（自由实现）
+
+development|开发基础|git|git|git|Git 版本控制
+development|开发基础|compiler|build-essential|gcc g++ make|C/C++ 编译工具链
+development|开发基础|make|make|make|Make 构建工具
+development|开发基础|cmake|cmake|cmake|CMake 构建工具
+development|开发基础|ninja|ninja-build|ninja|Ninja 构建工具
+development|开发基础|pkg-config|pkg-config|pkg-config|编译依赖查询
+development|开发基础|autoconf|autoconf|autoconf|Autoconf 构建工具
+development|开发基础|automake|automake|automake|Automake 构建工具
+development|开发基础|shellcheck|shellcheck|shellcheck|Shell 静态检查
+
+network|网络诊断|ping|iputils-ping|ping|网络连通性检查
+network|网络诊断|dnsutils|dnsutils|dig nslookup|DNS 查询与诊断
+network|网络诊断|net-tools|net-tools|netstat ifconfig|传统网络诊断命令
+network|网络诊断|traceroute|traceroute|traceroute|路由追踪
+network|网络诊断|tcpdump|tcpdump|tcpdump|网络抓包
+network|网络诊断|telnet|telnet|telnet|TCP 端口连通测试
+network|网络诊断|aria2|aria2|aria2c|多协议下载工具
+
+system|系统管理|htop|htop|htop|交互式进程监控
+system|系统管理|btop|btop|btop|资源监控工具
+system|系统管理|tree|tree|tree|目录树展示
+system|系统管理|lsof|lsof|lsof|文件和端口占用查询
+system|系统管理|jq|jq|jq|JSON 命令行处理
+system|系统管理|tmux|tmux|tmux|终端会话管理
+system|系统管理|gnu-screen|screen|screen|GNU Screen 终端会话管理
+system|系统管理|strace|strace|strace|系统调用跟踪
+system|系统管理|file|file|file|文件类型识别
+system|系统管理|ripgrep|ripgrep|rg|高速文本搜索
+system|系统管理|fd|fd-find|fdfind|高速文件查找
+
+editor|文本编辑|vim|vim|vim|Vim 编辑器
+editor|文本编辑|nano|nano|nano|Nano 编辑器

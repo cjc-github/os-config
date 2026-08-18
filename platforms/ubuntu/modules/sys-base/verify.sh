@@ -1,35 +1,56 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 模块：sys-base/verify  ——  验证 sys-base 模块的安装结果
+# 模块：sys-base/verify —— 验证配置中选中的基础工具
 # =============================================================================
-#
-# 【校验项】
-#   - curl / wget / ca-certificates / gpg / unzip / ping 六个命令是否可用（打印版本首行）
-# =============================================================================
-
 set -euo pipefail
 
-# 加载共享库（独立运行也支持）
-: "${PROJECT_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
+: "${MODULE_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+: "${PROJECT_DIR:=$(cd "$MODULE_DIR/../../../.." && pwd)}"
 # shellcheck source=../../../../lib/utils.sh
 . "$PROJECT_DIR/lib/utils.sh"
 # shellcheck source=../../../../lib/log.sh
 . "$PROJECT_DIR/lib/log.sh"
+# shellcheck source=packages.sh
+. "$MODULE_DIR/packages.sh"
+
+parse_install_args "$@"
+[[ "${DEBUG:-0}" == 1 ]] && set -x
+
+BASE_TOOLS_CONFIG="$(base_resolve_path "${BASE_TOOLS_CONFIG:-config/base-tools.conf}")"
+BASE_TOOLS_CATALOG="$(base_resolve_path "${BASE_TOOLS_CATALOG:-${MODULE_DIR#$PROJECT_DIR/}/packages.catalog}")"
+base_load_selection "$BASE_TOOLS_CONFIG" "$BASE_TOOLS_CATALOG"
+
+log_section "[base] 验证基础工具"
+if (( ${#BASE_SELECTED_TOOLS[@]} == 0 )); then
+  log_warn "配置未选择任何基础工具：没有需要验证的项目"
+  exit 0
+fi
 
 fail=0
-for c in curl wget gpg unzip ping; do
-  if cmd_exists "$c"; then
-    log_ok "  $c: $("$c" --version 2>&1 | head -1)"
+for id in "${BASE_SELECTED_TOOLS[@]}"; do
+  tool="${BASE_TOOL_NAME[$id]}"
+  category="${BASE_TOOL_CATEGORY[$id]}"
+  tool_failed=0
+
+  for package in ${BASE_TOOL_PACKAGES[$id]}; do
+    if ! base_package_installed "$package"; then
+      log_error "[${BASE_CATEGORY_DESC[$category]}/$tool] APT 软件包未安装：$package"
+      tool_failed=1
+    fi
+  done
+
+  for command_name in ${BASE_TOOL_COMMANDS[$id]}; do
+    if ! cmd_exists "$command_name"; then
+      log_error "[${BASE_CATEGORY_DESC[$category]}/$tool] 命令不可用：$command_name"
+      tool_failed=1
+    fi
+  done
+
+  if (( tool_failed == 0 )); then
+    log_ok "[${BASE_CATEGORY_DESC[$category]}/$tool] ${BASE_TOOL_DESC[$id]}"
   else
-    log_error "  $c 未找到"
     fail=1
   fi
 done
 
-if dpkg-query -W -f='${Status}' ca-certificates 2>/dev/null | grep -qx 'install ok installed'; then
-  log_ok "  ca-certificates: 已安装"
-else
-  log_error "  ca-certificates 未安装"
-  fail=1
-fi
 exit "$fail"
