@@ -1,0 +1,446 @@
+# ===========================================================================
+# base.catalog —— 基础软件工具目录（跨平台声明式数据层）
+# ===========================================================================
+#
+# 每个 [工具标识] 段描述一个可安装项目。字段：
+#
+#   type      = package | config      （package=包管理器安装；config=脚本动作）
+#   backend   = apt | npm | snap   （仅 package 必填）
+#   packages  = 后端软件包（空格分隔；apt 可多个）
+#   version   = 版本号（可写 $VAR，从 config/versions.env 展开；可留空）
+#   commands  = 安装后应存在的验证命令（空格分隔）
+#   track     = pin | latest          （pin=锁定 version；latest=跟随最新）
+#   deps      = 依赖的工具标识（逗号分隔）
+#   desc      = 一句话说明
+#   group     = 分组名（供 --list 归类显示）
+#
+# 约束：工具标识只允许小写字母、数字、下划线、连字符。
+# 用户通常只需要改 profiles/*.conf 选择工具，不需要改本文件。
+# ===========================================================================
+
+# --- 核心依赖 -------------------------------------------------------------
+[ca-certificates]
+type=package
+backend=apt
+packages=ca-certificates
+commands=
+track=latest
+deps=
+desc=HTTPS CA 根证书
+group=core
+
+[curl]
+type=package
+backend=apt
+packages=curl
+commands=curl
+track=latest
+deps=ca-certificates
+desc=HTTP/HTTPS 命令行客户端
+group=core
+
+[wget]
+type=package
+backend=apt
+packages=wget
+commands=wget
+track=latest
+deps=ca-certificates
+desc=文件下载工具
+group=core
+
+[gnupg]
+type=package
+backend=apt
+packages=gnupg
+commands=gpg
+track=latest
+deps=
+desc=GPG 密钥与签名工具
+group=core
+
+# --- 文件传输 -------------------------------------------------------------
+[lrzsz]
+type=package
+backend=apt
+packages=lrzsz
+commands=rz
+track=latest
+deps=
+desc=ZMODEM rz/sz 文件传输
+group=transfer
+
+[rsync]
+type=package
+backend=apt
+packages=rsync
+commands=rsync
+track=latest
+deps=
+desc=增量文件同步
+group=transfer
+
+# --- 压缩解压 -------------------------------------------------------------
+[zip]
+type=package
+backend=apt
+packages=zip
+commands=zip
+track=latest
+deps=
+desc=ZIP 压缩
+group=archive
+
+[unzip]
+type=package
+backend=apt
+packages=unzip
+commands=unzip
+track=latest
+deps=
+desc=ZIP 解压
+group=archive
+
+[tar]
+type=package
+backend=apt
+packages=tar
+commands=tar
+track=latest
+deps=
+desc=TAR 归档
+group=archive
+
+[gzip]
+type=package
+backend=apt
+packages=gzip
+commands=gzip
+track=latest
+deps=
+desc=GZIP 压缩解压
+group=archive
+
+[bzip2]
+type=package
+backend=apt
+packages=bzip2
+commands=bzip2
+track=latest
+deps=
+desc=BZIP2 压缩解压
+group=archive
+
+[xz]
+type=package
+backend=apt
+packages=xz-utils
+commands=xz
+track=latest
+deps=
+desc=XZ 压缩解压
+group=archive
+
+[7zip]
+type=package
+backend=apt
+packages=7zip
+commands=7z
+track=latest
+deps=
+desc=7-Zip 压缩解压
+group=archive
+
+[unrar-free]
+type=package
+backend=apt
+packages=unrar-free
+commands=unrar-free
+track=latest
+deps=
+desc=RAR 解压（自由实现）
+group=archive
+
+# --- 网络诊断 -------------------------------------------------------------
+[ping]
+type=package
+backend=apt
+packages=iputils-ping
+commands=ping
+track=latest
+deps=
+desc=网络连通性检查
+group=network
+
+[dnsutils]
+type=package
+backend=apt
+packages=dnsutils
+commands=dig
+track=latest
+deps=
+desc=DNS 查询与诊断
+group=network
+
+[net-tools]
+type=package
+backend=apt
+packages=net-tools
+commands=netstat
+track=latest
+deps=
+desc=传统网络诊断命令
+group=network
+
+[traceroute]
+type=package
+backend=apt
+packages=traceroute
+commands=traceroute
+track=latest
+deps=
+desc=路由追踪
+group=network
+
+[tcpdump]
+type=package
+backend=apt
+packages=tcpdump
+commands=tcpdump
+track=latest
+deps=
+desc=网络抓包
+group=network
+
+[telnet]
+type=package
+backend=apt
+packages=telnet
+commands=telnet
+track=latest
+deps=
+desc=TCP 端口连通测试
+group=network
+
+[aria2]
+type=package
+backend=apt
+packages=aria2
+commands=aria2c
+track=latest
+deps=
+desc=多协议下载工具
+group=network
+
+# --- 系统管理 -------------------------------------------------------------
+[htop]
+type=package
+backend=apt
+packages=htop
+commands=htop
+track=latest
+deps=
+desc=交互式进程监控
+group=system
+
+[btop]
+type=package
+backend=apt
+packages=btop
+commands=btop
+track=latest
+deps=
+desc=资源监控工具
+group=system
+
+[tree]
+type=package
+backend=apt
+packages=tree
+commands=tree
+track=latest
+deps=
+desc=目录树展示
+group=system
+
+[lsof]
+type=package
+backend=apt
+packages=lsof
+commands=lsof
+track=latest
+deps=
+desc=文件和端口占用查询
+group=system
+
+[jq]
+type=package
+backend=apt
+packages=jq
+commands=jq
+track=latest
+deps=
+desc=JSON 命令行处理
+group=system
+
+[tmux]
+type=package
+backend=apt
+packages=tmux
+commands=tmux
+track=latest
+deps=
+desc=终端会话管理
+group=system
+
+[gnu-screen]
+type=package
+backend=apt
+packages=screen
+commands=screen
+track=latest
+deps=
+desc=GNU Screen 终端会话管理
+group=system
+
+[strace]
+type=package
+backend=apt
+packages=strace
+commands=strace
+track=latest
+deps=
+desc=系统调用跟踪
+group=system
+
+[file]
+type=package
+backend=apt
+packages=file
+commands=file
+track=latest
+deps=
+desc=文件类型识别
+group=system
+
+[ripgrep]
+type=package
+backend=apt
+packages=ripgrep
+commands=rg
+track=latest
+deps=
+desc=高速文本搜索
+group=system
+
+[fd]
+type=package
+backend=apt
+packages=fd-find
+commands=fdfind
+track=latest
+deps=
+desc=高速文件查找
+group=system
+
+# --- 文本编辑 -------------------------------------------------------------
+[vim]
+type=package
+backend=apt
+packages=vim
+commands=vim
+track=latest
+deps=
+desc=Vim 编辑器
+group=editor
+
+[nano]
+type=package
+backend=apt
+packages=nano
+commands=nano
+track=latest
+deps=
+desc=Nano 编辑器
+group=editor
+
+# --- 开发基础 -------------------------------------------------------------
+[gcc]
+type=package
+backend=apt
+packages=build-essential
+commands=gcc
+track=latest
+deps=
+desc=C/C++ 编译工具链
+group=development
+
+[make]
+type=package
+backend=apt
+packages=make
+commands=make
+track=latest
+deps=
+desc=Make 构建工具
+group=development
+
+[cmake]
+type=package
+backend=apt
+packages=cmake
+commands=cmake
+track=latest
+deps=
+desc=CMake 构建工具
+group=development
+
+[ninja]
+type=package
+backend=apt
+packages=ninja-build
+commands=ninja
+track=latest
+deps=
+desc=Ninja 构建工具
+group=development
+
+[pkg-config]
+type=package
+backend=apt
+packages=pkg-config
+commands=pkg-config
+track=latest
+deps=
+desc=编译依赖查询
+group=development
+
+[autoconf]
+type=package
+backend=apt
+packages=autoconf
+commands=autoconf
+track=latest
+deps=
+desc=Autoconf 构建工具
+group=development
+
+[automake]
+type=package
+backend=apt
+packages=automake
+commands=automake
+track=latest
+deps=autoconf
+desc=Automake 构建工具
+group=development
+
+[shellcheck]
+type=package
+backend=apt
+packages=shellcheck
+commands=shellcheck
+track=latest
+deps=
+desc=Shell 静态检查
+group=development

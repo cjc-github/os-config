@@ -2,16 +2,20 @@
 # os-config .gitignore
 # ---------------------------------------------------------------------------
 
-# 运行日志（lib/log.sh 写入 logs/setup-*.log）
+# 运行日志（engine/lib/log.sh 写入 logs/setup-*.log）
 logs/
 *.log
 
-# npm 安装产物（ai-* 模块 install.sh 在模块目录内执行 npm install 时可能产生）
+# npm 安装产物（npm 后端的全局/本地安装可能产生）
 node_modules/
 **/node_modules/
 */node_modules/
 
-# 备份文件（lib/utils.sh backup_file 写入 *.bak.<timestamp>）
+# 运行状态（engine/lib/state.sh 写入 manifest.conf 与 actions/<name>/ 持久备份）
+state/
+state/actions/
+
+# 备份文件（engine/lib/rollback.sh 写入 *.bak.<timestamp>.<pid>）
 *.bak
 *.bak.*
 

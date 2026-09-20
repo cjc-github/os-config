@@ -1,338 +1,291 @@
 # os-config 项目设计
 
-> 状态：v6（2026-08-17）。平台按操作系统族分类；当前实现 Ubuntu 22.04/24.04。本文以仓库现有代码为准。
+> 状态：v7（2026-09-20）。架构从“平台 + 模块三件套”重构为“声明式 catalog + 无状态引擎 + 五动词”。
+> 当前实现 Ubuntu 22.04/24.04 的 Bash 引擎；Windows PowerShell 引擎待实现。本文以仓库现有代码为准。
 
 ## 一、目标和边界
 
-`os-config` 用一个入口完成开发环境初始化：
+`os-config` 用一个入口完成开发环境的安装与配置：
 
-1. 识别平台。
-2. 加载版本配置和用户配置。
-3. 读取模块元数据并校验。
-4. 根据依赖进行拓扑排序。
-5. 对每个模块执行 `install.sh` 和 `verify.sh`。
-6. 汇总成功、失败、验证失败、跳过和 blocked 状态。
+1. 选定一份**清单**（profile，或 `--pick` / `--all`）。
+2. 展开**依赖闭包**并拓扑排序。
+3. 对每一项分派到**后端适配器**（package）或**配置动作**（config）。
+4. 执行五动词之一：`install` / `update` / `remove` / `verify` / `status`。
+5. 汇总成功、跳过、失败，并在失败时回滚本次写操作。
 
-当前只实现 `ubuntu`，Ubuntu 22.04 与 24.04 共用该平台目录。`windows`、`macos`、`kylin` 是按操作系统族预留的扩展目录；没有 `modules/*/module.conf` 的占位平台会被入口明确拒绝。CPU 架构不作为平台目录。
+设计目标：新增一个工具**只改数据**（`catalog/*.catalog`）或**只加一个动作脚本**，不需要动引擎。
+
+### 与旧架构的差异（v6 → v7）
+
+| 维度 | v6 | v7 |
+|---|---|---|
+| 平台 | `platforms/<族>/` 目录 + `detect.sh` | 单引擎，架构差异下沉到后端/动作内部 |
+| 工具描述 | 每模块 `module.conf` + `install.sh` + `verify.sh` | `catalog/*.catalog` 数据文件 |
+| 选择 | `config/base-tools.conf` + `--module` | `profiles/*.conf` + `--pick`/`--all` |
+| 动词 | `install` / `verify` 两种 | `install`/`update`/`remove`/`verify`/`status` 五种 |
+| 后端 | 各模块自己写 apt/npm 命令 | 统一适配器 `apt`/`npm`/`snap` |
+| 状态 | 一次性 `.backups` manifest | `state/manifest.conf` + 每动作持久备份 |
 
 ## 二、目录结构
 
 ```text
-setup.sh
-lib/
-  log.sh
-  platform.sh
-  runner.sh
-  utils.sh
-config/
-  modules.conf
-  versions.env
-  user.env.example
-platforms/
-  ubuntu/
-    detect.sh
-    modules/<category>-<name>/
-      module.conf
-      install.sh
-      verify.sh
-      README.md
-  windows/
-  macos/
-  kylin/
-tests/run.sh
+setup.sh                    入口：解析动词与选择 → engine_run
+catalog/
+  base.catalog              系统与工具类的 package/config 条目
+  config.catalog            配置类条目
+profiles/
+  minimal.conf  default.conf  dev.conf  ai.conf
+engine/
+  lib/log.sh                终端+文件日志、脱敏、权限
+  lib/util.sh               配置加载、run_step、重试、sudo、apt 锁、代理推导、nvm
+  lib/rollback.sh           备份/回滚/trap/临时文件
+  lib/state.sh              manifest 与 state/actions/<name>/
+  lib/catalog.sh            catalog 解析、校验、变量/artifacts 展开、内联注册
+  lib/profile.sh            profile 解析、继承、tokens 解析、resolve
+  lib/graph.sh              依赖闭包、拓扑排序、逆序、dependents
+  lib/backends.sh           apt / npm / snap 适配器
+  lib/engine.sh             五动词编排器
+  actions/
+    mirrors.sh proxy.sh git.sh ssh.sh syslog.sh nosuspend.sh nodejs.sh
+state/
+  manifest.conf             已记录工具的产物清单
+  actions/<name>/           跨运行的持久备份（如 mirrors 的原源文件）
+tests/run.sh                回归测试
+docs/DESIGN.md              本文
 ```
 
-平台一级目录按操作系统族划分。`SYSTEM_ARCH` 单独记录 CPU 架构（如 `amd64`、`arm64`），不参与平台目录选择。
+## 三、数据层：catalog
 
-模块目录前缀只用于分类：
+### 条目类型
 
-- `sys-`：系统基础与系统配置；
-- `net-`：网络与连接工具；
-- `rt-`：runtime，运行环境与运行期辅助工具；
-- `ai-`：AI 开发工具。
-
-目录前缀不属于模块名。模块引用和命令行参数始终使用 `module.conf` 中的 `NAME`，例如目录 `rt-log` 的模块名是 `log`，运行命令是 `./setup.sh --module log`。
-
-## 三、模块契约
-
-### `module.conf`
+`type=package`——由包管理器安装：
 
 ```ini
-NAME=nodejs
-DESC=通过 nvm 安装 Node.js
-DEPS=base
-NEEDS_SUDO=0
+[cmake]
+type=package
+backend=apt              # apt | npm | snap
+packages=cmake           # 空格分隔
+commands=cmake           # verify 时须可用的命令
+track=latest             # latest | pin
+version=                 # track=pin 时的精确版本
+deps=                    # 空格分隔的工具 id
+group=development
+desc=CMake 构建工具
 ```
 
-runner 会校验：
+`type=config`——由动作脚本配置：
 
-- `NAME` 必须匹配 `[a-zA-Z0-9_-]+`；
-- `NAME` 不能重复；
-- `NEEDS_SUDO` 只能是 `0` 或 `1`；
-- 依赖名必须合法，拓扑排序时必须能找到；
-- 循环依赖会直接报错。
-
-加载顺序保存在 `_M_ORDER`，因此 `--all` 不依赖关联数组的随机键顺序。`--list` 会展示 `DESC`。
-
-### `install.sh`
-
-安装脚本应：
-
-```bash
-set -euo pipefail
-: "${PROJECT_DIR:=...}"
-. "$PROJECT_DIR/lib/utils.sh"
-. "$PROJECT_DIR/lib/log.sh"
-setup_traps
-parse_install_args "$@"
+```ini
+[git]
+type=config
+action=git               # engine/actions/git.sh
+deps=git-cli
+artifacts=$HOME/.gitconfig   # 每行一个；支持 $VAR 展开
+group=config
+desc=配置 git 身份与代理
 ```
 
-系统级操作使用 sudo；用户目录、nvm、npm 和 Git 用户配置不用 sudo。修改文件前使用：
+### 通用字段
 
-```bash
-register_rollback "$HOME/.bashrc"
-register_rollback /etc/example.conf sudo
+| 字段 | 适用 | 说明 |
+|---|---|---|
+| `type` | 必填 | `package` / `config` |
+| `backend` | package | `apt` / `npm` / `snap`，须在 `BACKEND_SUPPORTED` 中 |
+| `packages` | package | 非空 |
+| `action` | config | 非空，对应 `engine/actions/<action>.sh` |
+| `commands` | 选填 | verify 校验命令可用性 |
+| `track` | 选填 | `latest`（默认）/ `pin` |
+| `version` | 选填 | `track=pin` 时使用 |
+| `deps` | 选填 | 空格分隔，必须指向已定义工具 |
+| `artifacts` | 选填 | 每行一个产物路径，支持 `$HOME` / `~` |
+| `group` | 选填 | `@组名` 展开依据；内联注册的为 `adhoc` |
+| `desc` | 选填 | `--list` 展示 |
+| `sudo` | 选填 | config 类是否需要提权（package 类由 backend 推断） |
+
+### 校验规则（`catalog_validate`）
+
+加载任一文件后立即校验，任一条不满足即加载失败：
+
+- 分组头只能是 `[id]`，id 匹配 `^[a-z0-9][a-z0-9_-]*$`；
+- 未知字段、重复字段、`key=value` 之外的裸行一律拒绝；
+- `type` 必须是 `package` 或 `config`；
+- `package`：`backend` 必须受支持（`apt`/`npm`/`snap`），`packages` 非空；
+- `config`：`action` 非空；
+- `track` 只能是 `latest` / `pin`；`track=pin` 时必须有 `version`；
+- 所有 `deps` 必须能在最终 catalog 中找到。
+
+`catalog_load <dir>` 按文件名排序加载目录下所有 `*.catalog`，最后统一校验。
+
+### 变量与产物展开
+
+- `catalog_expand_vars`：支持 `$VAR` / `${VAR}`，未定义变量展开为空，并保护位置参数 `$1`。
+- `catalog_expand_artifacts <id>`：展开变量并把行首 `~` 换算为 `$HOME`，每行输出一个路径。
+
+### 内联（adhoc）注册
+
+`--pick apt:jq` 会调用 `catalog_define_adhoc <id> <backend> <packages> <commands> [desc]` 临时注册条目，`group=adhoc`、`track=latest`。已定义的同名 id 直接返回 0（幂等，不覆盖 catalog 定义）。
+
+## 四、选择层：profile
+
+```ini
+[default]
+desc=默认环境
+extends=minimal
+tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 ```
 
-### `verify.sh`
+- `tools` token 三种形态：工具 id；`@分组`；`后端:包`（内联注册）。
+- `extends` 先并入父清单全部工具，再追加自身（按顺序去重，父在前）。
+- `profile_tokens <name>` 输出最终 token 流（每行一个，已展开 `extends`）。
+- `profile_resolve <tokens...>` 输出最终工具 id 列表：id 直接保留，`@组` 展开为同组全部 id，`后端:包` 内联注册后保留。
 
-验证脚本只检查状态，不负责修复；退出码 `0` 表示通过，非零表示失败。配置明确禁用的可选功能应按 skipped 通过，而不是误报缺失。
+内置清单规模（用于回归测试基准）：
 
-## 四、入口参数
+| profile | 直接选择 | 解析后工具数 |
+|---|---:|---:|
+| minimal | mirrors, @core, git, ssh | 7 |
+| ai | mirrors, @core, proxy, nodejs, @ai | 10 |
+| default | extends minimal + @archive/@transfer/proxy/nodejs/@ai/syslog/nosuspend | 24 |
+| dev | extends default + @development/@network/@system/@editor | 52 |
 
-`setup.sh` 支持：
+## 五、依赖图：graph
 
-- `--module a,b`
-- `--all`
-- `--list`
-- `--dry-run`
-- `--install-only`
-- `--verify-only`
-- `--force`
-- `--keep-going`
-- `--no-sudo`
-- `--platform ubuntu`
-- `--debug`
+`graph_build <id...>` 做深度优先遍历，得到**依赖优先**的顺序（`GRAPH_ORDER`）。
 
-参数约束：
+- 对 `git-cli git ssh` → `git-cli git openssh-client ssh`。
+- 对 `nodejs claude` → `ca-certificates curl nodejs claude`。
 
-- `--install-only` 与 `--verify-only` 冲突；
-- `--all` 与 `--module` 冲突；
-- `--module`、`--platform` 必须有值；
-- 平台名和模块名会做格式检查。
+`graph_reverse` 原地反转 `GRAPH_ORDER`，用于 `remove`（被依赖者先删）：`claude nodejs curl ca-certificates`。
 
-## 五、runner 状态模型
+`graph_dependents <id>` 输出依赖该 id 的其它（已构建图内的）工具，例如对 `git` 输出 `git-cli`。
 
-每个模块可能处于：
+## 六、执行层：引擎
 
-- `ok`：安装和需要的验证均通过；
-- `failed`：安装、验证或 sudo 前置检查失败；
-- `skipped`：例如被 `--no-sudo` 跳过；
-- `blocked`：至少一个依赖不是 `ok`。
+### 动词到动作的映射
 
-默认遇错停止。`--keep-going` 时：
+| 动词 | package 类 | config 类 |
+|---|---|---|
+| install | `_backend_<b>_install` | `action_<action>_apply` |
+| update | `_backend_<b>_update` | `action_<action>_apply` |
+| remove | `_backend_<b>_remove` | `action_<action>_remove` |
+| verify | `_backend_<b>_verify` | `action_<action>_verify` |
+| status | `_backend_<b>_status` | `action_<action>_status`，缺失则通用回退 |
 
-- 失败模块之后的无关模块继续；
-- 依赖失败/跳过的下游模块标记 blocked；
-- 全部跑完后，只要安装或验证出现失败，runner 最终返回非零。
+动作脚本在首次使用时才 source（`_engine_source_action`），同一动作只加载一次。
 
-## 六、平台识别
-
-`lib/platform.sh` 读取 `/etc/os-release`，将发行版版本映射到操作系统族：
+### 编排流程
 
 ```text
-ubuntu/22.04 -> ubuntu
-ubuntu/24.04 -> ubuntu
+engine_run <verb> <id...>
+  ├─ 校验动词合法
+  ├─ graph_build（remove 时再 graph_reverse）
+  ├─ 逐项 engine_run_one
+  │    ├─ --no-sudo 且需提权 → 返回 100（skipped）
+  │    ├─ --dry-run 且是写动词 → 只打印
+  │    ├─ package → backend_dispatch
+  │    └─ config  → action_dispatch + _engine_state_sync
+  └─ 汇总：成功 / 跳过 / 失败；失败则返回 1
 ```
 
-`detect_architecture` 通过 `uname -m` 单独归一化 CPU 架构，并由 `setup.sh` 导出为 `SYSTEM_ARCH`。例如 `x86_64 -> amd64`、`aarch64 -> arm64`。因此版本号和 CPU 架构都不会成为 `platforms/` 的一级目录。
+- 非 `--keep-going` 时首个失败即中断（由 trap 触发整体回滚）。
+- `--keep-going` 时继续跑完，最终仍返回非零；引擎本身不触发回滚。
 
-识别到尚未验证的 Ubuntu 版本或尚未实现的麒麟系统时，会明确报错，不返回虚假的可用平台。`--platform` 可用于测试，但已实现平台自己的 `detect.sh` 仍会做双重检查并告警。测试可通过 `OS_RELEASE_FILE` 指定临时 os-release 文件。
+### 写操作预判
 
-## 七、权限策略
+- `_engine_needs_sudo`：package 类的 `apt`/`snap` 视为需要提权；config 类看 `sudo=1`。
+- `_engine_is_write_verb`：`install`/`update`/`remove` 是写动词。
 
-`NEEDS_SUDO=1` 模块运行前调用 `require_sudo`：
+## 七、后端适配器
 
-1. 优先尝试 `sudo -n true`，不弹提示；
-2. 如果当前是交互终端，执行 `sudo -v` 获取凭据；
-3. 非交互环境没有凭据时失败，并提示预先执行 `sudo -v`；
-4. `--no-sudo` 会跳过特权模块。
+`BACKEND_SUPPORTED=([apt]=1 [npm]=1 [snap]=1)`，与 `catalog_validate` 的判定必须保持一致。
 
-apt/dpkg 操作前使用 `wait_for_apt_lock`，锁等待失败必须向上传播，不能静默继续。
+- **apt**：`dpkg-query` 查状态与版本；install 跳过已装包，update 强制 `apt-get install` 以升级到候选版本；`track=pin` 时安装 `pkg=version`。apt 操作前 `require_sudo` + `wait_for_apt_lock`，并用 `with_retry`。
+- **npm**：先 `activate_nvm_default`；`track=pin` 时校验版本一致；安装走 `npm_install_global_fixed`（失败含 `ENOTEMPTY` 时定向清理隐藏残留并重试一次）；安装后 `_npm_selfcheck` 要求命令真的可执行且有版本输出（npm 退出码 0 不等于可执行文件可用）。
+- **snap**：install 只装缺失项；update 存在则 `snap refresh`，否则退回 install。
 
-## 八、配置文件
+后端只读 `CAT_*` 数组，不认识任何具体工具名。新增后端 = 实现 `_backend_<name>_{install,update,remove,verify,status}` 并登记到 `BACKEND_SUPPORTED`。
 
-### `config/user.env`
+## 八、状态层
 
-推荐从示例复制：
-
-```bash
-cp config/user.env.example config/user.env
-```
-
-关键默认值：
-
-```bash
-APT_UPGRADE=false
-
-MIRROR_SKIP_APT=false
-MIRROR_SKIP_APT_UPDATE=false
-
-PROXY_ENABLED=true
-PROXY_HOST=
-PROXY_PORT=
-PROXY_TEST_URL=https://github.com
-PROXY_CONNECT_TIMEOUT=5
-PROXY_MAX_TIME=15
-NO_PROXY=localhost,127.0.0.1,::1
-
-GIT_USER_NAME=
-GIT_USER_EMAIL=
-# 任一身份字段为空时输出 warning、跳过对应配置，并提示手动执行的 git config --global 命令。
-
-# 例如当前 IPv4 为 192.168.114.147，留空的 PROXY_HOST 会解析为
-# 192.168.114.1；PROXY_PORT 会解析为 7890。设置 PROXY_ENABLED=false 可关闭。
-# 安装和验证阶段都会 ping 代理主机；verify 还会使用 curl -x 通过代理访问 PROXY_TEST_URL。
-
-SSH_INSTALL_SERVER=false
-SSH_KEY_TYPE=ed25519
-SSH_KEY_PASSPHRASE=
-
-JOURNALD_MAX_USE=200M
-```
-
-安全说明：`user.env` 是普通 shell 配置文件。`SSH_KEY_PASSPHRASE` 若填写，会以明文存在；文件已被 `.gitignore` 忽略，但仍应控制本地权限。
-
-代理解析和检查统一由 `lib/utils.sh` 提供：
-
-1. `PROXY_HOST` 为空时，优先解析 `ip -4 route get 1.1.1.1` 的 `src`；失败时取 `hostname -I` 的首个非 loopback IPv4。
-2. 严格校验 IPv4 后，只把最后一段替换为 `1`；不会读取并采用路由输出中的真实 `via` 网关。
-3. `PROXY_PORT` 为空时取 `7890`；显式 host/port 会覆盖自动值。
-4. 安装和 verify 都执行一次 `ping -n -c 1 -W 2`。ping 失败会停止对应代理操作，并按顺序提示检查本机 IP/网卡、路由和代理主机防火墙。
-5. verify 随后执行 `curl -x "$RESOLVED_PROXY_URL" "$PROXY_TEST_URL"`；默认访问 `https://github.com`，连接超时 5 秒、总超时 15 秒。该步骤真实验证代理 TCP 端口、HTTPS CONNECT、TLS 和目标站点访问。
-6. curl 失败时提示检查代理程序监听端口、代理主机防火墙以及 HTTPS CONNECT 权限。
-6. `GIT_USER_NAME`、`GIT_USER_EMAIL` 分别独立处理，空值只输出 warning，不清除已有 Git 全局身份。
-
-### `config/versions.env`
-
-```bash
-NVM_VERSION=v0.40.1
-NODE_LTS_MAJOR=22
-NODE_VERSION=
-NPM_REGISTRY=https://registry.npmmirror.com
-```
-
-`NODE_VERSION` 非空时锁定完整 Node 版本；为空时解析 `NODE_LTS_MAJOR` 指定主版本下的远端版本。AI CLI 包名和完整版本也集中在此文件。
-
-## 九、模块设计摘要
-
-| NAME | DEPS | sudo | 关键行为 |
-|---|---|---:|---|
-| mirrors | — | 1 | 修正 deb822/legacy APT 源，按架构选择 archive/ports 镜像，验证不存在海外 Ubuntu 源 |
-| base | mirrors | 1 | apt update、安装基础包（含 `iputils-ping`）；只有 `APT_UPGRADE=true` 才全量升级 |
-| git | base | 1 | 安装 Git；身份为空时 warning 后跳过；自动推导代理，ping 后配置，并在 verify 中用 curl 访问 GitHub |
-| ssh | base | 1 | 默认只装客户端；服务端由 `SSH_INSTALL_SERVER` 控制 |
-| proxy | base | 0 | 默认启用；host 留空时把当前 IPv4 最后一段改为 1，port 留空时取 7890；ping 后安全写入 `.bashrc`，verify 用 curl 验证真实代理访问 |
-| nodejs | base | 0 | 使用 nvm 安装指定主版本或完整版本，并设为 default |
-| log | base | 1 | journald drop-in、移除旧版宽泛 logrotate 规则、debug 校验、oslogs 别名 |
-| screen | base | 0 | GNOME 验证 idle/lock/screensaver 三项；X11 验证 saver、DPMS、blanking |
-| claude/codex/opencode | nodejs | 0 | 固定版本 npm 全局安装、nvm default 优先、自检绝对命令路径 |
-
-依赖图：
+`state/manifest.conf` 记录 config 类工具的产物清单；package 类不落清单，状态实时查询后端。
 
 ```text
-mirrors → base ─┬─ git
-                ├─ ssh
-                ├─ proxy
-                ├─ nodejs ─┬─ claude
-                │          ├─ codex
-                │          └─ opencode
-                ├─ log
-                └─ screen
+state_record <id> <action> [artifact...]     # install/update 后写入
+state_forget <id>                            # remove 后清除
+state_has <id> / state_artifacts <id> / state_list
 ```
 
-## 十、日志
+每次运行开始 `state_snapshot` 把 `manifest.conf` 存到 `.manifest.run.bak`；成功或 `--keep-going` 时 `state_discard_snapshot` 丢弃，失败回滚时 `state_restore_snapshot` 还原，保证文件改动与清单改动一起回退（否则 status/remove 会依据残留清单去找已回滚的产物）。
 
-`lib/log.sh` 同时输出终端和日志文件：
+`state_action_dir <name>` 返回 `state/actions/<name>/`（模式 700），供动作做**跨运行**的持久记录，与一次性回滚不同。典型用例是 `mirrors`：`state/actions/mirrors/changed.txt` + 原文件备份，使 `remove mirrors` 能在任意后续运行中还原到“本动作首次改写前”的状态。
 
-- 日志目录尽量设为 `700`；
-- 日志文件尽量设为 `600`；
-- 即使调用方预先注入 `LOG_FILE`，也会创建目录和文件；
-- 落盘前脱敏 token/password/api key、Bearer Authorization、URL 用户名密码；
-- 终端仍保留命令原始输出，便于观察 npm/curl 进度。
+## 九、权限策略
 
-`run_step_verbose` 在 `set -e -o pipefail` 下使用条件管道读取 `PIPESTATUS[0]`，确保返回原命令退出码而不是 `tee` 的退出码。
+`require_sudo`：
+
+1. `sudo -n true` 成功则直接返回；
+2. 交互终端（`-t 0` 且 `-t 1`）执行 `sudo -v`；
+3. 非交互且无凭据则失败，提示预先 `sudo -v` 或 `--no-sudo`。
+
+apt/dpkg 前 `wait_for_apt_lock` 轮询 dpkg/apt 锁（默认最多 60s），失败必须向上传播。
+
+## 十、配置动作
+
+约定：`engine/actions/<name>.sh` 提供 `action_<name>_apply <id>` / `_remove` / `_verify`（`_status` 可选），由引擎惰性 source。动作脚本**不加 `set -e`**，出错用返回值表达。
+
+| 动作 | sudo | 关键行为 |
+|---|---:|---|
+| mirrors | 1 | 按架构选 archive/ports 镜像；改前把原源文件持久备份到 `state/actions/mirrors/`；remove 跨运行还原；改完 `apt update` |
+| proxy | 0 | 推导代理地址，ping 主机，写 shell/Git 代理；verify 用 `curl -x` 访问 `PROXY_TEST_URL` |
+| git | 1 | 写全局身份与代理，产物 `$HOME/.gitconfig`；身份为空则 warning 跳过 |
+| ssh | 0 | 生成 `$HOME/.ssh/id_<type>` 密钥（默认 ed25519） |
+| syslog | 1 | 写 journald drop-in 与限容配置；产物 `/etc/systemd/journald.conf.d/99-os-config.conf`、`$HOME/.bashrc` |
+| nosuspend | 0 | 关闭桌面息屏/自动锁屏 |
+| nodejs | 0 | nvm 安装 Node LTS，设 default，写 npm registry |
 
 ## 十一、备份与回滚
 
-`register_rollback <file> [user|sudo]` 支持两类状态：
+`register_rollback <file> [user|sudo]`：
 
-1. 原文件存在：创建 `.bak.<timestamp>.<pid>`，失败时恢复；
-2. 原文件不存在：记录为本次新建，失败时删除。
+1. 原文件存在 → 备份为 `.bak.<ts>.<pid>`，失败时恢复；
+2. 原文件不存在 → 记录为新建，失败时删除。
 
-用户文件用普通 `cp/rm`，系统文件用 `sudo cp/rm`。`_ROLLBACK_DONE` 防止 signal trap 和 EXIT trap 重复执行。runner 通过 `${LOG_FILE}.backups` manifest 汇总子进程创建的备份。
+`register_tmpfile` 登记临时文件，退出时统一清理。用户文件用普通 `cp/rm`，系统文件用 `sudo cp/rm`。`_ROLLBACK_DONE` 防止 trap 重复执行；`setup_traps` 安装 EXIT/ERR/signal 处理。
 
-## 十二、npm ENOTEMPTY 修复
+## 十二、日志
 
-AI CLI 安装不再在安装前删除正式包目录：
+`lib/log.sh` 同时输出终端与 `logs/setup-<ts>.log`：
 
-1. 首次正常执行 `npm install -g`；
-2. 捕获权限为 `600` 的原始输出；
-3. 只有输出包含 `ENOTEMPTY` 时，才查询 npm prefix；
-4. 只删除 `.<package>-*` 隐藏 rename 残留；
-5. scoped 包按 `@scope/.package-*` 处理；
-6. 重试一次。
+- 目录 `700`、文件 `600`；
+- 落盘前脱敏 token/password/api key、Bearer Authorization、URL 凭据；
+- 终端保留原始输出，便于观察 npm/curl 进度；
+- `run_step_verbose[_capture]` 用条件管道读取 `PIPESTATUS[0]`，返回原命令退出码而非 `tee` 的。
 
-普通失败保留原退出码，正式包目录不会被定向清理逻辑删除。
+## 十三、配置文件
 
-## 十三、journald 与 logrotate
+`config/versions.env`（版本与 npm 源）与 `config/user.env`（本机参数）在 `util.sh` 被 source 时以 `set -a` 自动加载（幂等，`_USER_CONFIG_LOADED` 守卫）。`user.env` 已被 `.gitignore` 忽略。
 
-journald 使用：
+常用变量见 `config/user.env.example`，包括 `MIRROR_APT_URL`/`MIRROR_APT_PORTS_URL`、`PROXY_*`、`GIT_USER_*`、`SSH_*`、`JOURNALD_MAX_USE`；版本变量包括 `NVM_VERSION`、`NODE_LTS_MAJOR`、`NODE_VERSION`、`NPM_REGISTRY` 与各 AI CLI 的包名/版本。
 
-```text
-/etc/systemd/journald.conf.d/99-os-config.conf
-```
-
-而不是直接 `sed /etc/systemd/journald.conf`。写入后 `systemctl restart systemd-journald` 必须成功，否则回滚。
-
-旧实现创建的 `/etc/logrotate.d/99-os-config` 覆盖 `/var/log/*.log`，可能与系统包规则重复；新实现会备份后移除该受管文件，并使用：
-
-```bash
-sudo logrotate --debug /etc/logrotate.conf
-```
-
-做只读验证。
+安全说明：`user.env` 是普通 shell 文件，`SSH_KEY_PASSPHRASE` 若填写即为明文。
 
 ## 十四、测试策略
 
-运行：
-
 ```bash
-./tests/run.sh
+./tests/run.sh          # 全部；打印 PASS/FAIL 与总计
+./tests/run.sh apt      # 只跑名字包含 apt 的用例
 ```
 
-测试不依赖 Bats，也不会修改宿主 `/etc`。当前覆盖：
+- 每个用例在 `( ... )` 子 shell 中运行，`HOME`/`STATE_DIR`/`STATE_FILE`/`LOG_FILE`/`PATH` 全部指向临时目录。
+- `sudo`/`fuser`/`ip`/`ping`/`apt-get`/`dpkg-query`/`dpkg`/`npm`/`node`/`snap`/`ssh-keygen`/`curl` 均为 fake，不会改动宿主机。
+- 覆盖：语法、真实 catalog 加载与关键字段、变量/artifacts 展开、非法输入拒绝、adhoc 幂等、profile 解析与继承、依赖闭包/逆序、state 权限、rollback 六种路径、util/IPv4/sudo、`with_retry`、代理推导、日志脱敏、semver/命令校验/后端分派、apt/npm/snap 五动词、引擎（install/remove/dry-run/no-sudo/失败/keep-going/status 回退/缺动作/未知动词）、动作脚本接口完整性、mirrors/nodejs/nosuspend/ssh 辅助函数、proxy 写入/幂等/重写/移除、`setup.sh` 入口参数。
 
-- 全部 Shell 文件 `bash -n` 和 `git diff --check`；
-- setup 参数缺值和冲突；
-- Ubuntu 22.04/24.04 操作系统族映射和 CPU 架构独立识别；
-- Ubuntu 全模块 dry-run，并验证未实现的占位平台会被拒绝；
-- keep-going、blocked 和最终返回码；
-- module.conf 重名校验；
-- verbose 返回码、日志脱敏、权限；
-- 用户文件回滚和 fake-sudo 新文件回滚；
-- npm 成功、普通失败、ENOTEMPTY scoped 包修复；
-- Git 身份为空时的 warning，以及代理 host 自动推导、默认端口 7890、ping 连通性、`curl -x` 访问 GitHub、失败诊断、安全 shell quoting 和 verify。
+## 十五、扩展
 
-真实 APT、systemd、网络下载仍建议分别在干净的 Ubuntu 22.04 和 24.04 虚拟机或容器中做集成测试。
+**加一个软件**：在 `catalog/*.catalog` 加一个 `[id]` 条目（package），必要时把它加入某个 profile 的 `tools`。
 
-## 十五、扩展新平台
+**加一个配置**：写 `engine/actions/<name>.sh`，实现三个动词函数，然后在 catalog 里加 `type=config` 条目并声明 `artifacts`。
 
-新增平台需要：
+**加一个后端**：实现 `_backend_<name>_<verb>` 五个函数，登记 `BACKEND_SUPPORTED`，并在 `catalog_validate` 的允许列表中同步。
 
-1. 以操作系统族创建 `platforms/<platform>/detect.sh`，例如 `windows`、`macos`、`ubuntu`、`kylin`；
-2. 创建 `modules/` 和模块三件套；
-3. 在 `detect_platform` 中增加发行版到操作系统族的精确映射；CPU 架构差异放在模块内部处理；
-4. 为新平台增加 dry-run 和集成测试。
-
-不要让平台识别函数返回尚未实现的目录名。
+**加一个平台**：实现对应引擎（Windows 为 `setup.ps1` + `engine/lib-win/`），复用同一套 catalog 与 profile 数据；平台差异只体现在后端与动作实现中。

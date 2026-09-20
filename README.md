@@ -1,129 +1,154 @@
 # os-config
 
-按操作系统族组织的模块化开发环境初始化脚本：平台识别 → 依赖排序 → 安装 → 验证 → 汇总。
+声明式的开发环境初始化脚本：用**清单（profile）**选择要装什么，用**五动词**驱动软件与配置的完整生命周期。
 
-> 当前实际支持：**Ubuntu 22.04 / 24.04（统一使用 `ubuntu`）**。`windows`、`macos`、`kylin` 为操作系统族占位目录，尚未实现模块；即使通过 `--platform` 强制选择也会明确失败。CPU 架构（如 amd64、arm64）单独识别，不再作为 `platforms/` 下的平台类别。
+```text
+选择清单  →  依赖闭包  →  install / update / remove / verify / status
+```
+
+> 当前实现的引擎：**Ubuntu 22.04 / 24.04**（amd64 与 arm64 自动区分镜像源）。
+> Windows 的 PowerShell 引擎尚未实现，`lib-win/` 与 `setup.ps1` 仍在规划中。
 
 ## 快速开始
 
 ```bash
-cp config/user.env.example config/user.env   # 可选：按需修改
-editor config/base-tools.conf                # 选择 sys-base 基础工具
-./setup.sh --platform ubuntu --list
-./setup.sh --platform ubuntu --all --dry-run
-./setup.sh                                   # Ubuntu 22.04/24.04 上自动识别为 ubuntu
+cp config/user.env.example config/user.env   # 可选：本机参数
+./setup.sh --list                            # 看 catalog 工具与可用 profile
+./setup.sh --dry-run                         # 默认 profile=default，只打印计划
+./setup.sh install --profile minimal         # 真正安装
 ```
 
-常用的定向执行方式：
+定向执行：
 
 ```bash
-./setup.sh --module nodejs,claude
-./setup.sh --module proxy --force
-./setup.sh --verify-only --module git,ssh
-./tests/run.sh
+./setup.sh install --pick git,ssh,proxy      # 临时指定，不用 profile
+./setup.sh install --pick @archive,apt:jq    # 支持 @分组 与 后端:包 内联
+./setup.sh verify  --profile dev
+./setup.sh remove  --pick apt:jq
+./setup.sh status  --pick nodejs,claude
+./tests/run.sh                               # 回归测试
 ```
 
-## 平台分类
+## 三个概念
 
-`platforms/` 的一级目录按**操作系统族**划分，而不是按发行版版本或 CPU 架构划分：
+### 1. catalog —— 声明“有什么”
 
-- Ubuntu 22.04 和 24.04 都映射到 `platforms/ubuntu/`；
-- Windows、macOS、麒麟分别使用 `platforms/windows/`、`platforms/macos/`、`platforms/kylin/`；
-- amd64、arm64 等 CPU 架构记录在 `SYSTEM_ARCH`，由各模块在确有差异时自行选择实现。
+`catalog/*.catalog` 是纯数据文件（INI 分组 + `key=value`），描述每个工具是什么、由谁安装、依赖谁。引擎不认识任何具体工具名，只读这份数据。
 
-## 重要默认值
+```ini
+[cmake]
+type=package
+backend=apt
+packages=cmake
+commands=cmake
+group=development
+desc=CMake 构建工具
 
-- `config/base-tools.conf`：按“分类 + 工具”二维选择 `sys-base` 安装的软件；分类 `enabled=false` 时整组跳过。
-- `APT_UPGRADE=false`：默认只执行 `apt update` 和安装所需包，不做全系统升级。
-- `GIT_USER_NAME`/`GIT_USER_EMAIL`：任一值留空时，不修改对应的 Git 全局身份配置，并在 warning 中给出 `git config --global user.name "你的姓名"` 或 `git config --global user.email "your-email@example.com"` 命令。
-- `PROXY_ENABLED=true`：默认写入 shell 和 Git 代理配置；`PROXY_HOST` 留空时取当前 IPv4 并只把最后一段替换为 `1`，`PROXY_PORT` 留空时使用 `7890`。写入前会 ping 代理主机；验证阶段还会执行 `curl -x <代理地址> https://github.com`，真实检查代理端口、HTTPS CONNECT 和外网访问。失败时打印网卡/IP、路由、防火墙和代理端口排查说明。设置 `PROXY_ENABLED=false` 可显式关闭。
-- `SSH_INSTALL_SERVER=false`：默认只安装 SSH 客户端，不安装 `openssh-server`。
-- `NODE_VERSION=`：留空时安装 `NODE_LTS_MAJOR` 指定主版本下的最新远端版本；填写完整版本可精确锁定。
-- `MIRROR_SKIP_APT=false`：默认会配置 Ubuntu APT 镜像；不希望改源时请显式设为 `true`。
+[git]
+type=config
+action=git
+deps=git-cli
+artifacts=$HOME/.gitconfig
+group=config
+desc=配置 git 身份与代理
+```
+
+- `type=package`：交给后端适配器（`apt` / `npm` / `snap`）。
+- `type=config`：交给配置动作脚本（`action=<名字>` → `engine/actions/<名字>.sh`），并用 `artifacts` 声明它写出的文件，供 `status` 与 `remove` 使用。
+
+字段校验在 `catalog_validate` 中完成：非法 id、未知字段、重复字段、非法的 backend/track、缺失的 packages/action、指向不存在工具的 `deps`，都会在加载阶段直接报错。
+
+### 2. profile —— 声明“要什么”
+
+`profiles/*.conf` 是一份选择清单，可以继承：
+
+```ini
+[default]
+desc=默认环境
+extends=minimal
+tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
+```
+
+- `tools` 支持三种写法：工具 id、`@分组`、`后端:包`（内联注册，无需改 catalog）。
+- `extends` 会先并入父清单的全部工具，再追加自己的（按顺序去重）。
+- 内置四份清单：`minimal` → `default` → `dev` 逐层扩展，`ai` 单独一套。
+
+### 3. 五动词 —— 声明“做什么”
+
+| 动词 | 语义 | 顺序 |
+|---|---|---|
+| `install` | 安装/应用（已装即跳过，幂等） | 依赖闭包，依赖优先 |
+| `update` | 更新到目标版本 | 依赖优先 |
+| `remove` | 卸载/还原配置 | **逆序**，被依赖者先删 |
+| `verify` | 只校验，不修改 | 依赖优先 |
+| `status` | 展示当前状态 | 依赖优先 |
+
+`type=config` 的动作按约定实现 `action_<名字>_apply|remove|verify`（另有可选的 `_status`，缺失时回退为通用状态输出）。
 
 ## 命令行参数
 
 | 参数 | 说明 |
 |---|---|
-| `--module a,b` | 只跑指定模块，并自动补齐依赖 |
-| `--all` | 按稳定的模块顺序跑全部模块 |
-| `--list` | 显示 NAME、目录、依赖、sudo 和描述 |
-| `--dry-run` | 只打印计划，不执行模块脚本 |
-| `--install-only` | 只安装，不验证 |
-| `--verify-only` | 只验证，不安装 |
-| `--force` | 强制重装或重写受管配置 |
-| `--keep-going` | 模块失败后继续跑无关模块；最终仍返回非零 |
-| `--no-sudo` | 跳过 `NEEDS_SUDO=1` 模块，其下游依赖模块会标记 blocked |
-| `--platform ubuntu` | 强制选择操作系统族，主要用于测试 |
-| `--debug` | 打开调试日志 |
+| `--profile <名>` | 使用 `profiles/` 中的清单 |
+| `--pick <a,b,@组,apt:jq>` | 临时指定选择 |
+| `--all` | 选择 catalog 中全部工具 |
+| `--list` | 列出 catalog 与 profile，然后退出 |
+| `--dry-run` | 只打印计划，不写盘 |
+| `--force` | 忽略幂等判断，强制重做 |
+| `--keep-going` | 单项失败不中断，跑完再汇总 |
+| `--no-sudo` | 跳过需要提权的项 |
+| `--debug` | 调试日志 |
 
-`--install-only` 与 `--verify-only`、`--all` 与 `--module` 不能同时使用。
+`--profile`、`--pick`、`--all` **三选一**，同时给出会报错（退出码 2）。不加选择时默认 `--profile default`。
 
-## 模块清单
+## 重要默认值
 
-模块目录使用分类前缀：`sys-` 表示系统类、`net-` 表示网络类、`rt-` 表示运行环境类、`ai-` 表示 AI 工具类。前缀只用于整理目录，不属于模块名；执行模块时应使用 `module.conf` 中的 `NAME`。例如 `rt-log` 的实际模块名是 `log`，应执行：
-
-```bash
-./setup.sh --module log
-```
-
-| NAME | 目录 | 依赖 | sudo | 作用 |
-|---|---|---|---:|---|
-| `mirrors` | `sys-mirrors` | — | 1 | 配置 Ubuntu deb822/legacy APT 镜像并验证 |
-| `base` | `sys-base` | mirrors | 1 | 按分类/工具二维配置安装基础软件，执行 apt update 和可选 upgrade |
-| `git` | `net-git` | base | 1 | 安装 Git；空身份 warning 后跳过；代理推导、ping，并用 curl 验证 GitHub 访问 |
-| `ssh` | `net-ssh` | base | 1 | 安装客户端、生成密钥；服务端为可选项 |
-| `proxy` | `net-proxy` | base | 0 | 推导并 ping 代理主机，写入代理变量并用 curl 验证 GitHub 访问 |
-| `nodejs` | `rt-nodejs` | base | 0 | 安装 nvm 和指定 Node 主版本/完整版本 |
-| `log` | `rt-log` | base | 1 | 安装日志工具，持久化并限容 journald，校验 logrotate，添加 `oslogs` 别名 |
-| `screen` | `rt-screen` | base | 0 | 配置并验证 GNOME 或 X11 的息屏/锁屏策略 |
-| `claude` | `ai-claude` | nodejs | 0 | 安装固定版本 Claude Code CLI |
-| `codex` | `ai-codex` | nodejs | 0 | 安装固定版本 Codex CLI |
-| `opencode` | `ai-opencode` | nodejs | 0 | 安装固定版本 OpenCode CLI |
-
-依赖关系：
-
-```text
-mirrors → base ─┬─ git
-                ├─ ssh
-                ├─ proxy
-                ├─ nodejs ─┬─ claude
-                │          ├─ codex
-                │          └─ opencode
-                ├─ log
-                └─ screen
-```
+- `MIRROR_APT_URL` / `MIRROR_APT_PORTS_URL`：默认清华 TUNA；amd64 用前者，arm64/riscv64 等用 `-ports`。换源前会把原文件持久备份到 `state/actions/mirrors/`，因此 `remove mirrors` 可跨运行还原。
+- `PROXY_ENABLED=true`：默认写入 shell 与 Git 代理。`PROXY_HOST` 留空时取当前 IPv4 并把最后一段替换为 `1`，`PROXY_PORT` 留空时用 `7890`。写入前 ping 代理主机，验证阶段用 `curl -x` 真实访问 `PROXY_TEST_URL`。
+- `GIT_USER_NAME` / `GIT_USER_EMAIL`：任一为空则跳过对应项并给出 `git config --global` 提示。
+- `SSH_INSTALL_SERVER=false`：默认只装客户端；`SSH_KEY_TYPE=ed25519`。
+- `NODE_VERSION=`：留空时装 `NODE_LTS_MAJOR` 下的最新版本，填写完整版本则精确锁定。
+- `JOURNALD_MAX_USE=200M`：journald 持久化上限。
 
 ## 安全性与失败处理
 
-- 需要 sudo 时，交互终端会执行 `sudo -v`；非交互环境需预先准备 sudo 凭据。
-- 受管文件修改前会注册回滚：原文件存在则备份，原文件不存在则在失败时删除新建文件。
-- 系统文件使用 sudo 模式备份和恢复；本次备份清单会写入运行日志旁的 manifest。
-- 日志目录/文件权限尽量收紧为 `700/600`，token、密码、Bearer Authorization 和 URL 凭据会在落盘前脱敏。
-- npm 全局安装首次正常执行；只有确认错误包含 `ENOTEMPTY` 时，才删除 npm 的隐藏 rename 残留并重试，不删除正式包目录。
-- `--keep-going` 只允许无关模块继续；依赖失败的模块会 blocked，整个命令最终返回非零。
+- 需要 sudo 时优先 `sudo -n`，交互终端则 `sudo -v`；非交互环境需预先准备凭据，或用 `--no-sudo` 跳过。
+- 受管文件改写前 `register_rollback`：原文件存在则备份、不存在则记录为新建；失败时统一回滚，临时文件一并清理。
+- 每次运行有独立日志，目录/文件权限收紧为 `700/600`，token、密码、Bearer Authorization、URL 凭据在落盘前脱敏。
+- apt/dpkg 操作前 `wait_for_apt_lock`；重试由 `with_retry` 统一处理。
+- npm 全局安装失败且输出含 `ENOTEMPTY` 时，只清理 `.<package>-*` 隐藏 rename 残留并重试一次，不动正式包目录。
+- `--keep-going` 时单项失败不触发回滚、最终仍返回非零；否则首个失败即回滚。
 
 ## 目录结构
 
 ```text
-setup.sh                 唯一入口
-config/                  模块清单、版本与用户配置
-lib/                     日志、平台识别、runner、公共工具
-platforms/ubuntu/        Ubuntu 22.04/24.04 共用的 11 个模块
-platforms/windows/       Windows 占位目录
-platforms/macos/         macOS 占位目录
-platforms/kylin/         麒麟操作系统占位目录
-tests/run.sh             不依赖 Bats 的快速回归测试
+setup.sh                 唯一入口（五动词）
+catalog/                 声明式数据层：base.catalog、config.catalog
+profiles/                选择清单：minimal/default/dev/ai
+engine/
+  lib/catalog.sh         目录加载与校验
+  lib/profile.sh         清单解析、继承、tokens 解析
+  lib/graph.sh           依赖闭包与拓扑/逆序
+  lib/backends.sh        后端适配器（apt/npm/snap）
+  lib/engine.sh          五动词编排器
+  lib/state.sh           state/manifest.conf 清单读写
+  lib/rollback.sh        备份/回滚/临时文件
+  lib/log.sh             终端 + 文件日志（脱敏）
+  lib/util.sh            配置加载、步骤、重试、sudo、代理、nvm
+  actions/*.sh           配置动作：mirrors/proxy/git/ssh/syslog/nosuspend/nodejs
+state/                   运行时状态（manifest + 每动作持久备份）
+tests/run.sh             不依赖 Bats 的回归测试
 docs/DESIGN.md           详细设计
-logs/                    运行时日志（已被 .gitignore 忽略）
+logs/                    运行时日志（.gitignore 忽略）
 ```
 
 ## 自测
 
 ```bash
-./tests/run.sh
-find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
-./setup.sh --platform ubuntu --all --dry-run
+./tests/run.sh            # 45 个用例，断言 catalog/profile/graph/state/rollback/后端/引擎/动作
+./tests/run.sh graph      # 只跑名字匹配的用例
 ```
 
-自动测试覆盖参数冲突、Ubuntu 22.04/24.04 到 `ubuntu` 的映射、CPU 架构独立识别、拓扑/blocked 状态、keep-going 返回码、元数据重名、日志脱敏、用户与 fake-sudo 回滚、npm `ENOTEMPTY` 修复，Git 空身份 warning，以及代理地址自动推导、默认端口、ping 连通性、`curl -x` 访问 GitHub、失败诊断和安全写入。
+测试全部在临时目录中进行：`HOME`、`STATE_DIR`、`PATH` 都被重定向，`apt-get`/`snap`/`npm`/`sudo`/`fuser`/`ping`/`ip` 均为 fake，不会改动宿主机 `/etc`。
+
+真实 APT、systemd、网络下载仍建议在干净的 Ubuntu 22.04 / 24.04 虚拟机或容器中做一次集成验证。

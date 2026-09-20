@@ -1,0 +1,164 @@
+# ===========================================================================
+# config.catalog —— 基础工具包 + 配置类工具目录
+# ===========================================================================
+#
+# 这里同时放两类条目：
+#
+#   type=package  「配置动作依赖的包」——例如 git、openssh-client、日志三件套。
+#                 它们由包管理器安装/卸载，因此拆成独立条目，remove 时才能
+#                 按依赖图逆序正确 apt remove。
+#
+#   type=config   真正写入配置的动作：apply（写入）/ remove（还原）/ verify（校验）。
+#                 action     = 动作名（对应 engine/actions/<action>.sh）
+#                 artifacts  = 该动作写入的产物路径（空格分隔，支持 ~ 和 $VAR）；
+#                              引擎据此记录 state/manifest 并在 remove 时清理
+#                 sudo       = 0 | 1（是否需要提权）
+#
+# 配置动作的依赖统一用 deps 声明，例如 [git] deps=git-cli。
+# ===========================================================================
+
+# --- 配置动作依赖的软件包 -------------------------------------------------
+[git-cli]
+type=package
+backend=apt
+packages=git
+commands=git
+track=latest
+deps=
+desc=Git 版本控制
+group=config
+
+[openssh-client]
+type=package
+backend=apt
+packages=openssh-client
+commands=ssh
+track=latest
+deps=
+desc=OpenSSH 客户端
+group=config
+
+[openssh-server]
+type=package
+backend=apt
+packages=openssh-server
+commands=sshd
+track=latest
+deps=openssh-client
+desc=OpenSSH 服务端（默认不选，需要时加入 profile）
+group=config
+
+[log-tools]
+type=package
+backend=apt
+packages=lnav bat logrotate
+commands=lnav batcat logrotate
+track=latest
+deps=
+desc=日志查看与轮转工具（lnav/bat/logrotate）
+group=config
+
+# --- 配置动作 -------------------------------------------------------------
+[mirrors]
+type=config
+action=mirrors
+artifacts=/etc/apt/sources.list.d/ubuntu.sources
+sudo=1
+track=latest
+deps=
+desc=切换 APT 镜像源为国内加速源
+group=config
+
+[proxy]
+type=config
+action=proxy
+artifacts=~/.bashrc
+sudo=0
+track=latest
+deps=
+desc=推导代理地址并写入 shell 代理环境变量
+group=config
+
+[git]
+type=config
+action=git
+artifacts=~/.gitconfig
+sudo=0
+track=latest
+deps=git-cli
+desc=配置 git 身份与代理
+group=config
+
+[ssh]
+type=config
+action=ssh
+artifacts=~/.ssh
+sudo=0
+track=latest
+deps=openssh-client
+desc=生成 SSH 用户密钥
+group=config
+
+[syslog]
+type=config
+action=syslog
+artifacts=/etc/systemd/journald.conf.d/99-os-config.conf ~/.bashrc
+sudo=1
+track=latest
+deps=log-tools
+desc=journald 限容与 oslogs 别名
+group=config
+
+[nosuspend]
+type=config
+action=nosuspend
+artifacts=
+sudo=0
+track=latest
+deps=
+desc=关闭桌面息屏与自动锁屏
+group=config
+
+[nodejs]
+type=config
+action=nodejs
+artifacts=~/.nvm
+sudo=0
+track=latest
+deps=curl
+desc=通过 nvm 安装 Node LTS 并配置 npm 镜像
+group=runtime
+
+# --- AI 编码 CLI（npm 全局包） --------------------------------------------
+[claude]
+type=package
+backend=npm
+packages=@anthropic-ai/claude-code
+version=$CLAUDE_CODE_VERSION
+commands=claude
+track=pin
+deps=nodejs
+desc=Claude Code CLI
+group=ai
+
+[codex]
+type=package
+backend=npm
+packages=@openai/codex
+version=$CODEX_VERSION
+commands=codex
+track=pin
+deps=nodejs
+desc=OpenAI Codex CLI
+group=ai
+
+[opencode]
+type=package
+backend=npm
+packages=opencode-ai
+version=$OPENCODE_VERSION
+commands=opencode
+track=pin
+deps=nodejs
+desc=OpenCode CLI
+group=ai
