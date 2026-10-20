@@ -23,7 +23,10 @@ const S = {
   installed: [],
   catalogTools: [],
   rollingBack: false,
+  tab: "results",
 };
+
+const TABS = ["results", "log", "history"];
 
 function $(id) {
   return document.getElementById(id);
@@ -31,6 +34,24 @@ function $(id) {
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function setTab(name) {
+  if (TABS.indexOf(name) === -1) return;
+  const changed = S.tab !== name;
+  S.tab = name;
+  TABS.forEach((tab) => {
+    const button = $(tab + "-tab");
+    const panel = $("panel-" + tab);
+    const active = tab === name;
+    if (button) {
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+    }
+    if (panel) panel.hidden = !active;
+  });
+  if (changed && name === "history") refreshHistory();
 }
 
 function make(tag, text, cls) {
@@ -201,6 +222,7 @@ function visibleIds() {
 }
 
 function selectionChanged() {
+  updateRunButton();
   renderParams();
   schedulePlan(300);
 }
@@ -392,13 +414,23 @@ async function renderSudo() {
 
 // ---------- 运行与事件 ----------
 
+function updateRunButton() {
+  $("run-btn").disabled = S.running || S.selection.size === 0;
+}
+
 function setRunning(running) {
   S.running = running;
   $("run-state").textContent = running ? "运行中" : "空闲";
   $("run-state").className = "pill " + (running ? "busy" : "");
-  $("run-btn").disabled = running;
   $("plan-btn").disabled = running;
   $("remove-btn").disabled = running;
+  updateRunButton();
+  if (!running) {
+    $("log-state").hidden = true;
+    $("current-item").hidden = true;
+  } else {
+    $("log-state").hidden = false;
+  }
 }
 
 function clearLog() {
@@ -413,7 +445,14 @@ function appendLog(line, cls) {
 
 function handleItem(event) {
   const id = event.id;
-  if (!id || event.event !== "item_end") return;
+  if (!id) return;
+  if (event.event === "item_start") {
+    const indicator = $("current-item");
+    indicator.textContent = (event.phase === "verify" ? "校验 " : "执行 ") + id;
+    indicator.hidden = false;
+    return;
+  }
+  if (event.event !== "item_end") return;
   const phase = event.phase === "verify" ? "verify" : "install";
   const entry = S.results.get(id) || { install: null, verify: null };
   entry[phase] = event.status || "failed";
@@ -444,10 +483,32 @@ function resultIds() {
   ]));
 }
 
+function renderSummary(ids) {
+  const counts = { ok: 0, skipped: 0, failed: 0, pending: 0 };
+  ids.forEach((id) => {
+    const entry = S.results.get(id) || {};
+    if (entry.install === "failed" || entry.verify === "failed") counts.failed += 1;
+    else if (entry.install === "ok" || entry.verify === "ok") counts.ok += 1;
+    else if (entry.install === "skipped" || entry.verify === "skipped") counts.skipped += 1;
+    else counts.pending += 1;
+  });
+  const parts = ["成功 " + counts.ok];
+  if (counts.skipped) parts.push("跳过 " + counts.skipped);
+  if (counts.failed) parts.push("失败 " + counts.failed);
+  if (counts.pending) parts.push("未执行 " + counts.pending);
+  $("result-summary").textContent = parts.join(" · ");
+  $("results-count").textContent = String(ids.length);
+  const tab = $("results-tab");
+  if (counts.failed) tab.setAttribute("data-state", "failed");
+  else if (counts.ok && !counts.pending) tab.setAttribute("data-state", "ok");
+  else tab.removeAttribute("data-state");
+}
+
 function renderResults() {
   const body = $("results");
   clear(body);
   const ids = resultIds();
+  renderSummary(ids);
   if (!ids.length) {
     const row = document.createElement("tr");
     const cell = make("td", "尚未选择工具", "hint");
@@ -485,6 +546,7 @@ function highlightLog(id) {
     }
   });
   if (first) {
+    setTab("log");
     if (!$("autoscroll").checked) first.scrollIntoView({ block: "center" });
     else $("log").scrollTop = first.offsetTop - 40;
   } else {
@@ -505,6 +567,7 @@ function finishRun(event) {
   });
   renderResults();
   setRunning(false);
+  setTab("results");
   if (S.eventSource) S.eventSource.close();
   S.eventSource = null;
   toast(event && event.rc === 0 ? "执行完成" : "执行结束，请查看结果", event && event.rc === 0 ? "ok" : "warn");
@@ -588,6 +651,7 @@ async function checkStatus() {
       S.results.set(item.id, entry);
     });
     renderResults();
+    setTab("results");
     clearLog();
     (data.logs || []).forEach((line) => appendLog(line));
     if (data.exit !== undefined) {
@@ -620,10 +684,12 @@ async function startRun(verb) {
   S.results = new Map();
   S.rollingBack = false;
   renderResults();
+  $("current-item").hidden = true;
   try {
     const data = await api("POST", "/api/run", body);
     S.activeRunId = data.run_id;
     setRunning(true);
+    setTab("log");
     connectEvents(S.activeRunId);
     toast("已开始执行：" + data.run_id, "ok");
   } catch (err) {
@@ -752,7 +818,7 @@ async function loadHistory(runId) {
       if (line) appendLog(line);
     });
     $("log").scrollTop = 0;
-    $("history").hidden = false;
+    setTab("results");
     toast("已载入历史：" + runId);
   } catch (err) {
     /* toast 已由 api() 处理 */
@@ -854,11 +920,23 @@ function wireEvents() {
   $("confirm-cancel").addEventListener("click", () => {
     $("confirm-modal").hidden = true;
   });
-  $("history-toggle").addEventListener("click", () => {
-    const box = $("history");
-    box.hidden = !box.hidden;
-    if (!box.hidden) refreshHistory();
+  TABS.forEach((name) => {
+    const button = $(name + "-tab");
+    button.addEventListener("click", () => setTab(name));
+    button.addEventListener("keydown", (ev) => {
+      let next = null;
+      const index = TABS.indexOf(S.tab);
+      if (ev.key === "ArrowRight") next = (index + 1) % TABS.length;
+      else if (ev.key === "ArrowLeft") next = (index - 1 + TABS.length) % TABS.length;
+      else if (ev.key === "Home") next = 0;
+      else if (ev.key === "End") next = TABS.length - 1;
+      if (next === null) return;
+      ev.preventDefault();
+      setTab(TABS[next]);
+      $(TABS[next] + "-tab").focus();
+    });
   });
+  $("history-refresh").addEventListener("click", refreshHistory);
   $("log-copy").addEventListener("click", copyLog);
   $("log-download").addEventListener("click", downloadLog);
 }

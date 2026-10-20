@@ -16,7 +16,6 @@
     <div class="status">
       <span id="run-state" class="pill">空闲</span>
       <span id="sudo-badge" class="pill" title="sudo 预授权状态">检查中…</span>
-      <button id="history-toggle" type="button" class="ghost">历史</button>
       <button id="status-btn" type="button" class="ghost">检查状态</button>
     </div>
   </header>
@@ -78,36 +77,61 @@
         <div id="remove-list" class="tool-list"></div>
         <button id="remove-btn" type="button" class="danger">卸载所选</button>
       </details>
-      <div id="history" class="history" hidden></div>
     </section>
   </main>
 
-  <section class="panel results-panel">
-    <div class="panel-head">
-      <h2>结果</h2>
-      <span class="hint">点击失败行可在日志中定位</span>
+  <section class="panel workspace">
+    <div class="tabbar" role="tablist" aria-label="运行详情">
+      <button id="results-tab" class="tab is-active" type="button" role="tab"
+              aria-selected="true" aria-controls="panel-results" data-tab="results">
+        结果 <span id="results-count" class="tab-count">0</span>
+      </button>
+      <button id="log-tab" class="tab" type="button" role="tab"
+              aria-selected="false" aria-controls="panel-log" data-tab="log" tabindex="-1">
+        实时日志 <span id="log-state" class="tab-live" hidden></span>
+      </button>
+      <button id="history-tab" class="tab" type="button" role="tab"
+              aria-selected="false" aria-controls="panel-history" data-tab="history" tabindex="-1">
+        历史
+      </button>
+      <span id="current-item" class="current-item" hidden></span>
     </div>
-    <table class="results">
-      <thead>
-        <tr><th>工具</th><th>安装结果</th><th>校验结果</th></tr>
-      </thead>
-      <tbody id="results"></tbody>
-    </table>
-  </section>
 
-  <section class="panel log-panel">
-    <div class="panel-head">
-      <h2>实时日志</h2>
-      <div class="head-actions">
-        <label class="check-line compact">
-          <input id="autoscroll" type="checkbox" checked>
-          <span>自动滚动</span>
-        </label>
-        <button id="log-copy" type="button" class="ghost">复制</button>
-        <button id="log-download" type="button" class="ghost">下载</button>
+    <div id="panel-results" class="tab-panel" role="tabpanel" aria-labelledby="results-tab">
+      <div class="panel-head">
+        <span id="result-summary" class="hint">选择工具后，这里会显示每一项的执行结果。</span>
+        <span class="hint">点击失败行可在日志中定位</span>
       </div>
+      <table class="results">
+        <thead>
+          <tr><th>工具</th><th>安装结果</th><th>校验结果</th></tr>
+        </thead>
+        <tbody id="results"></tbody>
+      </table>
     </div>
-    <pre id="log" class="log" tabindex="0"></pre>
+
+    <div id="panel-log" class="tab-panel" role="tabpanel" aria-labelledby="log-tab" hidden>
+      <div class="panel-head">
+        <span class="hint">引擎输出会实时写入这里，运行结束后仍可复制或下载。</span>
+        <div class="head-actions">
+          <label class="check-line compact">
+            <input id="autoscroll" type="checkbox" checked>
+            <span>自动滚动</span>
+          </label>
+          <button id="log-copy" type="button" class="ghost">复制</button>
+          <button id="log-download" type="button" class="ghost">下载</button>
+        </div>
+      </div>
+      <pre id="log" class="log" tabindex="0"></pre>
+    </div>
+
+    <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="history-tab" hidden>
+      <div class="panel-head">
+        <span class="hint">点击一条运行记录可回看结果与日志，不会改变当前选择。</span>
+        <button id="history-refresh" type="button" class="ghost">刷新</button>
+      </div>
+      <div id="history" class="history"></div>
+    </div>
   </section>
 </div>
 

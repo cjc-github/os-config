@@ -458,3 +458,22 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("/api/status", js)
         self.assertNotIn("innerHTML", js)
         self.assertTrue((root / "style.css").read_text(encoding="utf-8").strip())
+
+    def test_workspace_tabs_present(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        self.assertIn('role="tablist"', html)
+        for elem_id in ["results-tab", "log-tab", "history-tab",
+                        "panel-results", "panel-log", "panel-history",
+                        "results-count", "result-summary", "current-item",
+                        "history-refresh"]:
+            self.assertIn(f'id="{elem_id}"', html)
+        self.assertIn('aria-controls="panel-results"', html)
+        self.assertIn('aria-selected="true"', html)
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["function setTab", 'setTab("log")', 'setTab("results")',
+                      "item_start", "results-count", "result-summary"]:
+            self.assertIn(token, js)
+        css = (root / "style.css").read_text(encoding="utf-8")
+        for token in [".tab-panel[hidden]", ".tab.is-active", ".tabbar"]:
+            self.assertIn(token, css)
