@@ -256,6 +256,7 @@ class AuthTests(ServerFixture):
         self.assertEqual(code, 415)
 
 FAKE = r'''#!/usr/bin/env bash
+printf '%s\n' "$@" > "$0.args"
 ev="${OS_CONFIG_EVENTS:-}"
 emit() { [[ -n "$ev" ]] || return 0; printf '%s\n' "$1" >>"$ev"; }
 if [[ " $* " == *" --list "* ]]; then printf '%s\n' '__CATALOG__'; exit 0; fi
@@ -317,6 +318,25 @@ class RunTests(ServerFixture):
         code, _ = self.post("/api/run", {"verb": "remove", "pick": ["git"], "confirm": True})
         self.assertEqual(code, 202)
         self.wait_idle()
+
+    def test_pick_is_single_comma_argument(self):
+        code, body = self.post("/api/run", {"verb": "install",
+                                            "pick": ["git", "apt:other"]})
+        self.assertEqual(code, 202, body)
+        self.wait_idle()
+        args = (self.cfg.project_dir / "run-setup.sh.args").read_text(
+            encoding="utf-8").splitlines()
+        self.assertEqual(args.count("--pick"), 1)
+        self.assertEqual(args[args.index("--pick") + 1], "git,apt:other")
+
+    def test_plan_pick_is_single_comma_argument(self):
+        code, body = self.post("/api/plan", {"verb": "install",
+                                             "pick": ["git", "apt:other"]})
+        self.assertEqual(code, 200, body)
+        args = (self.cfg.project_dir / "run-setup.sh.args").read_text(
+            encoding="utf-8").splitlines()
+        self.assertEqual(args.count("--pick"), 1)
+        self.assertEqual(args[args.index("--pick") + 1], "git,apt:other")
 
     def test_verify_phase_runs(self):
         code, body = self.post("/api/run", {"verb": "install", "pick": ["git"],
@@ -441,6 +461,14 @@ class InstalledTests(ServerFixture):
         self.assertEqual(d["items"][0]["status"], "ok")
         self.assertEqual(d["exit"], 0)
         self.assertTrue(d["logs"])
+
+    def test_status_pick_is_single_comma_argument(self):
+        code, _, body = self.get("/api/status?pick=git,apt:jq", token="tok")
+        self.assertEqual(code, 200, body)
+        args = (self.cfg.project_dir / "installed-setup.sh.args").read_text(
+            encoding="utf-8").splitlines()
+        self.assertEqual(args.count("--pick"), 1)
+        self.assertEqual(args[args.index("--pick") + 1], "git,apt:jq")
 
     def test_history_list(self):
         base = self.cfg.state_dir / "ui" / "runs"

@@ -145,6 +145,11 @@ def _log_item_id(line: str, current: str | None) -> str | None:
     return current
 
 
+def _pick_arg(pick: list[str]) -> str:
+    """setup.sh 的 --pick 只接受一个逗号分隔的参数。"""
+    return ",".join(pick)
+
+
 def _pick_ids(pick: list[str]) -> list[str]:
     """把 pick token 转成规范化后的工具 id（内联 token 与 profile.sh 规则一致）。"""
     return [schema.normalize_adhoc_id(token)[0] if ":" in token else token
@@ -545,7 +550,7 @@ class Handler(BaseHTTPRequestHandler):
                 required_by.setdefault(dep, []).append(selector)
 
         cmd = list(self.server.config.setup_cmd or [])
-        cmd += [verb, "--dry-run", "--pick", *pick, "--yes"]
+        cmd += [verb, "--dry-run", "--pick", _pick_arg(pick), "--yes"]
         try:
             logs, events, rc = self._run_dry(cmd)
         except OSError as exc:
@@ -782,7 +787,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_GATEWAY, str(exc))
             return
         cmd = list(self.server.config.setup_cmd or [])
-        cmd += ["verify", "--pick", *pick, "--keep-going", "--yes"]
+        cmd += ["verify", "--pick", _pick_arg(pick), "--keep-going", "--yes"]
         try:
             logs, events, rc, timed_out = self._capture_process(cmd, timeout=120)
         except OSError as exc:
@@ -1106,7 +1111,7 @@ class RunJob:
     def _run_phase(self, verb: str) -> int:
         cmd = list(self.config.setup_cmd or [])
         cmd.append(verb)
-        cmd += ["--pick", *self.pick]
+        cmd += ["--pick", _pick_arg(self.pick)]
         cmd.append("--yes")
         if self.keep_going:
             cmd.append("--keep-going")
