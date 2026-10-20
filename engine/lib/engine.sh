@@ -8,6 +8,9 @@
 # ---------------------------------------------------------------------------
 
 declare -gA _ACTION_SOURCED=()
+declare -g  ENGINE_OK=0
+declare -g  ENGINE_SKIPPED=0
+declare -g  ENGINE_FAILED=0
 
 # ---------------------------------------------------------------------------
 # 动作分派
@@ -175,18 +178,38 @@ engine_run() {
   fi
 
   local -a order=("${GRAPH_ORDER[@]}")
+  ENGINE_OK=0; ENGINE_SKIPPED=0; ENGINE_FAILED=0
+  events_emit run_start "\"verb\":\"$(json_escape "$verb")\",\"dry_run\":$([[ "${DRY_RUN:-0}" == 1 ]] && echo true || echo false),\"phase\":\"$(json_escape "$verb")\",\"ids\":$(json_string_array "${order[@]}")"
   log_section "$verb：共 ${#order[@]} 项（含依赖闭包）"
 
   local -a failed=() skipped=()
-  local id rc ok=0
+  local id rc ok=0 status
   for id in "${order[@]}"; do
     log_info "[$id] ${CAT_DESC[$id]:-$id}（type=${CAT_TYPE[$id]}${CAT_BACKEND[$id]:+/${CAT_BACKEND[$id]}}）"
+    events_emit item_start "\"id\":\"$(json_escape "$id")\",\"verb\":\"$(json_escape "$verb")\",\"phase\":\"$(json_escape "$verb")\",\"type\":\"$(json_escape "${CAT_TYPE[$id]:-}")\""
     engine_run_one "$verb" "$id"
     rc=$?
-    case "$rc" in
-      0) ok=$((ok + 1)) ;;
-      100) skipped+=("$id") ;;
-      *) failed+=("$id"); log_error "[$id] $verb 失败（rc=$rc）" ;;
+    if [[ $rc -eq 0 ]]; then
+      if [[ "${DRY_RUN:-0}" == 1 ]] && _engine_is_write_verb "$verb"; then
+        status=planned
+      else
+        status=ok
+      fi
+    elif [[ $rc -eq 100 ]]; then
+      status=skipped
+    else
+      status=failed
+    fi
+    events_emit item_end "\"id\":\"$(json_escape "$id")\",\"verb\":\"$(json_escape "$verb")\",\"phase\":\"$(json_escape "$verb")\",\"type\":\"$(json_escape "${CAT_TYPE[$id]:-}")\",\"status\":\"$status\",\"rc\":$rc"
+    case "$status" in
+      ok|planned) ok=$((ok + 1)) ;;
+      skipped) skipped+=("$id") ;;
+      failed) failed+=("$id"); log_error "[$id] $verb 失败（rc=$rc）" ;;
+    esac
+    case "$status" in
+      ok|planned) ENGINE_OK=$((ENGINE_OK + 1)) ;;
+      skipped)    ENGINE_SKIPPED=$((ENGINE_SKIPPED + 1)) ;;
+      failed)     ENGINE_FAILED=$((ENGINE_FAILED + 1)) ;;
     esac
 
     if (( ${#failed[@]} > 0 )); then

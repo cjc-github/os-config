@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>os-config</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <strong>os-config</strong>
+      <span class="muted">本机开发环境配置</span>
+    </div>
+    <div class="status">
+      <span id="run-state" class="pill">空闲</span>
+      <span id="sudo-badge" class="pill" title="sudo 预授权状态">检查中…</span>
+      <button id="history-toggle" type="button" class="ghost">历史</button>
+      <button id="status-btn" type="button" class="ghost">检查状态</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel tools-panel">
+      <div class="panel-head">
+        <h2>工具清单</h2>
+        <div class="head-actions">
+          <button id="select-all" type="button" class="ghost">全选</button>
+          <button id="select-none" type="button" class="ghost">清空</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="preset">预设</label>
+        <select id="preset"></select>
+      </div>
+      <div class="field">
+        <label for="search">搜索</label>
+        <input id="search" type="search" placeholder="按名称或说明过滤" autocomplete="off">
+      </div>
+      <div id="dep-banner" class="banner" hidden></div>
+      <div id="tool-list" class="tool-list"></div>
+    </section>
+
+    <section class="panel params-panel">
+      <div class="panel-head"><h2>参数</h2></div>
+      <div id="params" class="params"></div>
+      <div class="options">
+        <label class="check-line">
+          <input id="keep-going" type="checkbox" checked>
+          <span>某项失败后继续执行其余项</span>
+        </label>
+        <p class="hint">关闭后：遇到失败立即回滚并停止。</p>
+        <label class="check-line">
+          <input id="verify-after" type="checkbox" checked>
+          <span>安装完成后执行校验</span>
+        </label>
+        <label class="check-line">
+          <input id="force" type="checkbox">
+          <span>强制重新执行（忽略已安装状态）</span>
+        </label>
+        <label class="check-line">
+          <input id="clear-secrets" type="checkbox">
+          <span>清除已保存的口令</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel plan-panel">
+      <div class="panel-head"><h2>执行计划</h2></div>
+      <div id="plan-summary" class="plan-summary"></div>
+      <div class="actions">
+        <button id="plan-btn" type="button" class="ghost">预览计划</button>
+        <button id="run-btn" type="button" class="primary">开始执行</button>
+      </div>
+      <details id="remove-section" class="remove">
+        <summary>卸载工具</summary>
+        <div id="remove-list" class="tool-list"></div>
+        <button id="remove-btn" type="button" class="danger">卸载所选</button>
+      </details>
+      <div id="history" class="history" hidden></div>
+    </section>
+  </main>
+
+  <section class="panel results-panel">
+    <div class="panel-head">
+      <h2>结果</h2>
+      <span class="hint">点击失败行可在日志中定位</span>
+    </div>
+    <table class="results">
+      <thead>
+        <tr><th>工具</th><th>安装结果</th><th>校验结果</th></tr>
+      </thead>
+      <tbody id="results"></tbody>
+    </table>
+  </section>
+
+  <section class="panel log-panel">
+    <div class="panel-head">
+      <h2>实时日志</h2>
+      <div class="head-actions">
+        <label class="check-line compact">
+          <input id="autoscroll" type="checkbox" checked>
+          <span>自动滚动</span>
+        </label>
+        <button id="log-copy" type="button" class="ghost">复制</button>
+        <button id="log-download" type="button" class="ghost">下载</button>
+      </div>
+    </div>
+    <pre id="log" class="log" tabindex="0"></pre>
+  </section>
+</div>
+
+<div id="confirm-modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h3 id="confirm-title">确认卸载</h3>
+    <p id="confirm-text"></p>
+    <div class="actions">
+      <button id="confirm-cancel" type="button" class="ghost">取消</button>
+      <button id="confirm-ok" type="button" class="danger">确认卸载</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

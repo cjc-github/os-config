@@ -10,6 +10,7 @@ declare -ga _ROLLBACK_EXISTED=()
 declare -gA _ROLLBACK_SEEN=()
 declare -g  _TRAPS_SET=0
 declare -g  _ROLLBACK_DONE=0
+declare -g  _ROLLBACK_PERFORMED=0
 
 register_tmpfile() { _TMPFILES+=("$1"); }
 
@@ -87,10 +88,19 @@ rollback_on_exit() {
     return 0
   fi
 
+  # verify 只读校验，失败不应改动文件或清单。
+  if [[ "${VERB:-}" == "verify" ]]; then
+    _rollback_call state_discard_snapshot
+    return 0
+  fi
+
   # 失败：文件改动与清单改动必须一起还原，否则 status/remove 会依据
   # 残留清单去找已回滚的产物。无文件需回滚时也要还原清单。
+  _ROLLBACK_PERFORMED=1
+  local -a restored=()
   if (( ${#_ROLLBACK_ORIG[@]} == 0 )); then
     _rollback_call state_restore_snapshot
+    _rollback_emit_event "${restored[@]}"
     return 0
   fi
   log_error "脚本失败（rc=$rc），回滚以下文件到备份："
@@ -100,6 +110,7 @@ rollback_on_exit() {
     bak="${_ROLLBACK_BACKUP[$i]}"
     mode="${_ROLLBACK_MODE[$i]}"
     existed="${_ROLLBACK_EXISTED[$i]:-1}"
+    restored+=("$orig")
     if [[ "$existed" == 0 ]]; then
       if [[ "$mode" == "sudo" ]]; then
         sudo rm -f -- "$orig" 2>/dev/null || { log_error "  删除新文件失败：$orig"; continue; }
@@ -120,7 +131,14 @@ rollback_on_exit() {
     fi
   done
   _rollback_call state_restore_snapshot
+  _rollback_emit_event "${restored[@]}"
   log_warn "回滚完成。请检查失败原因后重跑"
+}
+
+# _rollback_emit_event <path...> —— 仅在事件模块存在时发送 rollback 事件
+_rollback_emit_event() {
+  declare -F events_emit >/dev/null 2>&1 || return 0
+  events_emit rollback "\"phase\":\"$(json_escape "${VERB:-install}")\",\"restored\":$(json_string_array "$@")"
 }
 
 trap_err_handler() {

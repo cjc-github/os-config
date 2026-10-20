@@ -119,10 +119,32 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 - npm 全局安装失败且输出含 `ENOTEMPTY` 时，只清理 `.<package>-*` 隐藏 rename 残留并重试一次，不动正式包目录。
 - `--keep-going` 时单项失败不触发回滚、最终仍返回非零；否则首个失败即回滚。
 
+## Web UI
+
+`ui.sh` 在本机启动一个只监听 `127.0.0.1` 的网页界面：勾选工具、修改参数、预览计划，并查看逐行日志与每项结果。
+
+```bash
+./ui.sh                       # 启动并自动打开浏览器
+./ui.sh --no-open --port 8765 # 只打印地址，指定端口
+./ui.sh --help
+```
+
+- 依赖 `python3` >= 3.10，只用标准库；`--host` 仅接受 `127.0.0.1` 或 `localhost`。
+- 首次启动若需要 sudo，会先执行 `sudo -v` 预授权，之后每 50 秒刷新凭据；授权失败只让需要提权的动作不可用，不影响页面启动。
+- 每次启动生成一次性 token，终端打印 `http://127.0.0.1:<port>/?token=...`；未带 token 的请求一律返回 401。
+- 页面修改的参数写入 `config/ui.env`（权限 0600），优先级高于 `config/user.env`，不会覆盖 `user.env`；口令类字段不回显明文。字段旁的“恢复默认”会清除该项覆盖，删除 `config/ui.env` 可整体还原。
+- 运行记录在 `state/ui/runs/<run_id>/`（`run.log`、`events.jsonl`、`meta.json`），服务日志在 `state/ui/server.log`；这些路径均被 `.gitignore` 忽略。
+- 安全边界：只绑定本机回环地址，无远程访问；token 经环境变量传给服务，不出现在进程参数中。
+
 ## 目录结构
 
 ```text
 setup.sh                 唯一入口（五动词）
+ui.sh                    Web UI 启动器（本机回环 + 一次性 token）
+ui/                      Web UI 服务与静态资源（Python 标准库）
+  server.py              HTTP/SSE 服务、运行编排
+  schema.py              参数白名单、adhoc id、路径与文件名校验
+  static/                index.html / app.js / style.css
 catalog/                 声明式数据层：base.catalog、config.catalog
 profiles/                选择清单：minimal/default/dev/ai
 engine/

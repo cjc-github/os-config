@@ -20,6 +20,10 @@ export PROJECT_DIR
 . "$PROJECT_DIR/engine/lib/state.sh"
 # shellcheck source=engine/lib/catalog.sh
 . "$PROJECT_DIR/engine/lib/catalog.sh"
+# shellcheck source=engine/lib/events.sh
+. "$PROJECT_DIR/engine/lib/events.sh"
+# shellcheck source=engine/lib/list_json.sh
+. "$PROJECT_DIR/engine/lib/list_json.sh"
 # shellcheck source=engine/lib/profile.sh
 . "$PROJECT_DIR/engine/lib/profile.sh"
 # shellcheck source=engine/lib/graph.sh
@@ -36,6 +40,7 @@ FORCE=0
 DRY_RUN=0
 KEEP_GOING=0
 NO_SUDO=0
+ASSUME_YES=0
 DEBUG="${DEBUG:-0}"
 
 VERB=install
@@ -43,6 +48,7 @@ PROFILE_NAME=""
 PICK=""
 ALL=0
 LIST=0
+JSON=0
 
 VERBS='install|update|remove|verify|status'
 
@@ -70,10 +76,12 @@ os-config —— 声明式软件与配置管理（选择清单 + 五动词）
 
 选项：
   --list       列出 catalog 工具与可用 profile，然后退出
+  --json       与 --list 连用，输出 JSON（供 Web UI 读取）
   --dry-run    只打印计划，不做写操作
   --force      忽略幂等判断，强制重做
   --keep-going 单项失败不中断，跑完再汇总（不触发回滚）
   --no-sudo    跳过需要提权的项
+  --yes        非交互确认（自动回答 y）
   --debug      输出调试日志
   -h, --help   本帮助
 
@@ -100,10 +108,12 @@ while [[ $# -gt 0 ]]; do
     --pick)    _need_arg "$@"; PICK="$2"; shift 2 ;;
     --all)     ALL=1; shift ;;
     --list)    LIST=1; shift ;;
+    --json)    JSON=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --force)   FORCE=1; shift ;;
     --keep-going) KEEP_GOING=1; shift ;;
     --no-sudo) NO_SUDO=1; shift ;;
+    --yes)     ASSUME_YES=1; shift ;;
     --debug)   DEBUG=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) log_error "未知参数：$1"; usage; exit 2 ;;
@@ -116,7 +126,13 @@ if (( (ALL == 1) + (${#PICK} > 0 ? 1 : 0) + (${#PROFILE_NAME} > 0 ? 1 : 0) > 1 )
   exit 2
 fi
 
-export FORCE DRY_RUN KEEP_GOING NO_SUDO DEBUG
+if [[ "$JSON" == 1 && "$LIST" != 1 ]]; then
+  log_error "--json 必须与 --list 一起使用"
+  exit 2
+fi
+
+export FORCE DRY_RUN KEEP_GOING NO_SUDO ASSUME_YES DEBUG
+export VERB
 
 # ---------------------------------------------------------------------------
 # 加载数据层
@@ -126,6 +142,10 @@ catalog_load || { log_error "catalog 加载失败"; exit 1; }
 profile_load >/dev/null 2>&1 || log_warn "profiles 目录不可用（--pick/--all 仍可用）"
 
 if [[ "$LIST" == 1 ]]; then
+  if [[ "$JSON" == 1 ]]; then
+    list_json
+    exit 0
+  fi
   id="" t="" name=""
   printf '\n%s\n' "工具目录（catalog/*.catalog）"
   printf '  %-14s %-10s %-22s %-16s %s\n' ID GROUP TYPE DEPS DESC
@@ -178,6 +198,15 @@ fi
 state_init
 state_snapshot          # 记录运行前清单，失败回滚时还原
 setup_traps
+
+# EXIT trap：先回滚（保留原退出码），再发 run_end 供 Web UI 汇总
+_exit_report() {
+  local rc=$?
+  rollback_on_exit "$rc"
+  events_emit run_end "\"verb\":\"$(json_escape "$VERB")\",\"phase\":\"$(json_escape "$VERB")\",\"ok\":${ENGINE_OK:-0},\"skipped\":${ENGINE_SKIPPED:-0},\"failed\":${ENGINE_FAILED:-0},\"rc\":$rc,\"rolled_back\":$([[ "${_ROLLBACK_PERFORMED:-0}" == 1 ]] && echo true || echo false)"
+  exit "$rc"
+}
+trap '_exit_report' EXIT
 
 log_section "os-config $VERB"
 log_info "PROJECT_DIR = $PROJECT_DIR"

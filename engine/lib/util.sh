@@ -5,7 +5,7 @@
 : "${PROJECT_DIR:=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 
 # ---------------------------------------------------------------------------
-# 用户配置加载（versions.env + user.env），幂等
+# 用户配置加载（versions.env + user.env + ui.env），幂等
 # ---------------------------------------------------------------------------
 load_user_config() {
   [[ "${_USER_CONFIG_LOADED:-0}" == "1" ]] && return 0
@@ -13,7 +13,7 @@ load_user_config() {
   local vf="$PROJECT_DIR/config/versions.env"
   local uf="$PROJECT_DIR/config/user.env"
   local f
-  for f in "$vf" "$uf"; do
+  for f in "$vf" "$uf" "$PROJECT_DIR/config/ui.env"; do
     [[ -f "$f" ]] || continue
     set -a
     # shellcheck disable=SC1090
@@ -43,6 +43,7 @@ util_trim() {
 # ---------------------------------------------------------------------------
 confirm() {
   local prompt="$1" ans
+  [[ "${ASSUME_YES:-0}" == 1 ]] && return 0
   read -r -p "$prompt [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]]
 }

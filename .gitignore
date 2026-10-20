@@ -21,8 +21,16 @@ state/actions/
 
 # 用户私有配置（敏感信息：代理、token、个人偏好等，不进版本库）
 config/user.env
+config/ui.env
 config/*.local.env
 *.local.env
+
+# Web UI 运行时（ui.sh 写入 state/ui/server.log 与每次运行记录）
+state/ui/
+
+# Python 缓存（ui/*.py 编译产物）
+__pycache__/
+*.pyc
 
 # 临时/中转文件
 *.tmp

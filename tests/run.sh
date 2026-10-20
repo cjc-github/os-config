@@ -115,6 +115,7 @@ load_libs() {
   . "$ROOT/engine/lib/profile.sh"
   . "$ROOT/engine/lib/graph.sh"
   . "$ROOT/engine/lib/backends.sh"
+  . "$ROOT/engine/lib/events.sh"
   . "$ROOT/engine/lib/engine.sh"
 }
 
@@ -315,6 +316,8 @@ test_syntax() {
     bash -n "$f" 2>/dev/null || { rc=1; not_ok "语法错误：$f"; }
   done < <(find "$ROOT/engine" "$ROOT/tests" -type f -name '*.sh' -print0)
   bash -n "$ROOT/setup.sh" 2>/dev/null || { rc=1; not_ok "语法错误：setup.sh"; }
+  bash -n "$ROOT/ui.sh" 2>/dev/null || { rc=1; not_ok "语法错误：ui.sh"; }
+  python3 -m py_compile "$ROOT"/ui/*.py 2>/dev/null || { rc=1; not_ok "Python 语法错误：ui/*.py"; }
   (( rc == 0 )) && ok
   return 0
 }
@@ -593,6 +596,24 @@ test_rollback_keepgoing_keeps_state() {
   KEEP_GOING=0
   assert_true "keep-going 保留本次清单记录" state_has kept
   assert_file_missing "$STATE_RUN_BAK" "keep-going 丢弃快照"
+}
+
+test_rollback_verify_noop() {
+  state_init
+  state_record keep act1 /tmp/keep
+  state_snapshot
+  state_record verifynew act2 /tmp/new
+  local f="$TESTDIR/f" ev="$TESTDIR/events.jsonl"
+  printf 'old' >"$f"
+  register_rollback "$f"
+  printf 'new' >"$f"
+  : >"$ev"
+  VERB=verify OS_CONFIG_EVENTS="$ev" rollback_on_exit 1
+  assert_eq new "$(cat "$f")" "verify 失败不回滚文件"
+  assert_true "verify 失败保留清单记录" state_has verifynew
+  assert_file_missing "$STATE_RUN_BAK" "verify 失败丢弃快照"
+  assert_not_contains "$(cat "$ev")" '"event":"rollback"' "verify 失败不发 rollback 事件"
+  assert_eq 0 "${_ROLLBACK_PERFORMED:-0}" "verify 不回滚标记"
 }
 
 # ===========================================================================
@@ -1094,8 +1115,199 @@ test_entry() {
   assert_rc_eq 0 "$rc" "status 返回 0"
 }
 
+test_events_json() {
+  assert_eq 'a\"b\\c\nd\te' "$(json_escape $'a"b\\c\nd\te')" "JSON 转义"
+  assert_eq '["a","b\"c"]' "$(json_string_array a 'b"c')" "字符串数组"
+  assert_eq '[]' "$(json_string_array)" "空数组"
+}
+
+test_events_emit() {
+  export OS_CONFIG_EVENTS="$TESTDIR/events.jsonl"
+  : >"$OS_CONFIG_EVENTS"
+  events_emit run_start '"verb":"install","ids":["a"]'
+  events_emit item_end '"id":"a","status":"ok","rc":0'
+  local out; out=$(python3 - "$OS_CONFIG_EVENTS" <<'PY'
+import json,sys
+rows=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]
+assert len(rows)==2, rows
+assert rows[0]["event"]=="run_start" and rows[0]["verb"]=="install"
+assert rows[1]["id"]=="a" and rows[1]["status"]=="ok"
+print("ok")
+PY
+)
+  assert_eq ok "$out" "事件 JSONL 可解析"
+  unset OS_CONFIG_EVENTS
+  events_emit run_end '"rc":0'; assert_rc_eq 0 "$?" "未设置事件文件时静默"
+  OS_CONFIG_EVENTS="/no/such/dir/x"; events_emit run_end '"rc":0'; assert_rc_eq 0 "$?" "写失败不影响流程"
+  unset OS_CONFIG_EVENTS
+}
+
+test_ui_env_precedence() {
+  mkdir -p "$TESTDIR/config"
+  printf 'SAME=versions\nONLY_V=1\n' >"$TESTDIR/config/versions.env"
+  printf 'SAME=user\nONLY_U=1\n'     >"$TESTDIR/config/user.env"
+  printf "SAME=ui\nONLY_UI='a b'\n"   >"$TESTDIR/config/ui.env"
+  local old_project="$PROJECT_DIR"
+  PROJECT_DIR="$TESTDIR"
+  unset _USER_CONFIG_LOADED
+  load_user_config
+  assert_eq ui "$SAME" "ui.env 覆盖 user.env"
+  assert_eq 1 "$ONLY_V" "versions.env 仍生效"
+  assert_eq 'a b' "$ONLY_UI" "ui.env 值解析"
+  PROJECT_DIR="$old_project"
+  unset SAME ONLY_V ONLY_U ONLY_UI _USER_CONFIG_LOADED
+}
+
+test_confirm_assume_yes() {
+  ASSUME_YES=1 confirm "x"; assert_rc_eq 0 "$?" "ASSUME_YES 直接确认"
+  ASSUME_YES=0 confirm "x" </dev/null; assert_rc_eq 1 "$?" "无输入默认拒绝"
+  local out rc
+  out=$(bash "$ROOT/setup.sh" --yes --profile minimal --dry-run 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "--yes 被接受"
+}
+
+test_remove_assume_yes() {
+  catalog_reset
+  register_config_tool testfake testfake
+  _install_testfake_actions
+  rm -f "$TESTDIR/marker"
+  ASSUME_YES=1 engine_run remove testfake >/dev/null 2>&1
+  assert_rc_eq 0 "$?" "ASSUME_YES 下 remove 不阻塞"
+  assert_contains "$(cat "$TESTDIR/marker" 2>/dev/null)" "removed" "remove 动作被执行"
+}
+
+test_list_json() {
+  local out rc
+  out=$(bash "$ROOT/setup.sh" --list --json 2>/dev/null); rc=$?
+  assert_rc_eq 0 "$rc" "--list --json 返回 0"
+  local parsed
+  parsed=$(python3 - "$out" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1])
+assert len(d["catalog"])==56, len(d["catalog"])
+by={x["id"]:x for x in d["catalog"]}
+assert by["git"]["type"]=="config" and by["git"]["action"]=="git"
+assert by["git"]["deps"]=="git-cli"
+assert by["git"]["artifacts"][0].endswith("/.gitconfig")
+assert isinstance(by["git"]["sudo"], bool)
+profs={p["name"]:p for p in d["profiles"]}
+assert set(profs)=={"ai","default","dev","minimal"}, profs.keys()
+assert profs["default"]["extends"]=="minimal"
+assert "mirrors" in profs["minimal"]["raw_tools"]
+assert "@core" in profs["minimal"]["tokens"]
+assert isinstance(profs["minimal"]["tools"], list)
+assert len(profs["minimal"]["tools"])==7
+assert len(profs["ai"]["tools"])==10
+assert len(profs["default"]["tools"])==24
+assert len(profs["dev"]["tools"])==52
+assert profs["minimal"]["error"]==""
+print("ok")
+PY
+)
+  assert_eq ok "$parsed" "JSON 结构与计数"
+  bash "$ROOT/setup.sh" --json >/dev/null 2>&1; rc=$?
+  assert_rc_eq 2 "$rc" "--json 必须配合 --list"
+}
+
+test_ui_launcher() {
+  local out rc
+  out=$(bash "$ROOT/ui.sh" --help 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "ui.sh --help"
+  assert_contains "$out" "用法" "ui.sh 帮助内容"
+  bash "$ROOT/ui.sh" --port 0 </dev/null >/dev/null 2>&1; rc=$?
+  assert_rc_eq 2 "$rc" "非法端口返回 2"
+  bash "$ROOT/ui.sh" --host 0.0.0.0 </dev/null >/dev/null 2>&1; rc=$?
+  assert_rc_eq 2 "$rc" "非本机 host 返回 2"
+  bash "$ROOT/ui.sh" --nope </dev/null >/dev/null 2>&1; rc=$?
+  assert_rc_eq 2 "$rc" "未知参数返回 2"
+}
+
+test_ui_ignores_and_docs() {
+  local gi; gi="$(cat "$ROOT/.gitignore")"
+  assert_contains "$gi" "config/ui.env" "忽略 ui.env"
+  assert_contains "$gi" "state/ui/" "忽略 state/ui"
+  assert_contains "$gi" "__pycache__/" "忽略 __pycache__"
+  local rd; rd="$(cat "$ROOT/README.md")"
+  assert_contains "$rd" "./ui.sh" "README 启动说明"
+  assert_contains "$rd" "127.0.0.1" "README 绑定地址"
+  assert_contains "$(bash "$ROOT/setup.sh" --help 2>&1)" "--yes" "usage 含 --yes"
+  assert_contains "$(bash "$ROOT/setup.sh" --help 2>&1)" "--json" "usage 含 --json"
+}
+
+# ===========================================================================
+# 10. 引擎结构化事件
+# ===========================================================================
+test_engine_events() {
+  export OS_CONFIG_EVENTS="$TESTDIR/events.jsonl"; : >"$OS_CONFIG_EVENTS"
+  catalog_reset
+  register_config_tool testfake testfake
+  _install_testfake_actions
+  local rc
+  engine_run install testfake >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "engine 成功"
+  local out
+  out=$(python3 - "$OS_CONFIG_EVENTS" <<'PY'
+import json,sys
+rows=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]
+ev=[r["event"] for r in rows]
+assert ev[0]=="run_start" and ev[1]=="item_start" and ev[2]=="item_end", ev
+assert rows[0]["ids"]==["testfake"]
+assert rows[1]["id"]=="testfake" and rows[1]["verb"]=="install" and rows[1]["phase"]=="install"
+assert rows[2]["id"]=="testfake" and rows[2]["status"]=="ok" and rows[2]["rc"]==0
+assert rows[2]["verb"]=="install" and rows[2]["phase"]=="install" and isinstance(rows[2]["type"],str)
+print("ok")
+PY
+)
+  assert_eq ok "$out" "事件顺序与字段"
+  unset OS_CONFIG_EVENTS
+}
+
+test_engine_events_dryrun_planned() {
+  export OS_CONFIG_EVENTS="$TESTDIR/events.jsonl"; : >"$OS_CONFIG_EVENTS"
+  catalog_reset; register_config_tool testfake testfake; _install_testfake_actions
+  DRY_RUN=1 engine_run install testfake >/dev/null 2>&1; DRY_RUN=0
+  assert_contains "$(cat "$OS_CONFIG_EVENTS")" '"status":"planned"' "dry-run 标记 planned"
+  unset OS_CONFIG_EVENTS
+}
+
+test_engine_events_rollback() {
+  export OS_CONFIG_EVENTS="$TESTDIR/events.jsonl"; : >"$OS_CONFIG_EVENTS"
+  local f="$TESTDIR/f"; printf old >"$f"
+  register_rollback "$f"; printf new >"$f"
+  rollback_on_exit 1
+  local out
+  out=$(python3 - "$OS_CONFIG_EVENTS" "$f" <<'PY'
+import json,sys
+rows=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]
+rb=[r for r in rows if r["event"]=="rollback"]
+assert len(rb)==1 and rb[0]["restored"]==[sys.argv[2]], rb
+print("ok")
+PY
+)
+  assert_eq ok "$out" "rollback 事件"
+  assert_eq 1 "${_ROLLBACK_PERFORMED:-0}" "回滚标记"
+  unset OS_CONFIG_EVENTS
+}
+
+test_setup_run_end() {
+  local ev="$TESTDIR/events.jsonl"; : >"$ev"
+  OS_CONFIG_EVENTS="$ev" bash "$ROOT/setup.sh" --profile minimal --dry-run >/dev/null 2>&1
+  assert_contains "$(cat "$ev")" '"event":"run_end"' "setup 发出 run_end"
+  assert_contains "$(cat "$ev")" '"rolled_back":false' "run_end 回滚字段"
+}
+
 # ===========================================================================
 run_test '所有 Shell 脚本语法'                         test_syntax
+run_test '事件 JSON 转义'                              test_events_json
+run_test '事件 JSONL 写入'                             test_events_emit
+run_test 'ui.env 覆盖顺序'                             test_ui_env_precedence
+run_test 'ASSUME_YES 非交互确认'                       test_confirm_assume_yes
+run_test 'ASSUME_YES 卸载'                             test_remove_assume_yes
+run_test '--list --json 结构'                          test_list_json
+run_test 'engine 事件顺序与字段'                        test_engine_events
+run_test 'engine dry-run planned 事件'                  test_engine_events_dryrun_planned
+run_test 'engine rollback 事件'                         test_engine_events_rollback
+run_test 'setup run_end 事件'                           test_setup_run_end
 run_test '真实 catalog 加载与关键字段'                 test_catalog_real
 run_test 'catalog 变量展开'                            test_catalog_expand_vars
 run_test 'catalog artifacts 展开'                      test_catalog_artifacts
@@ -1115,6 +1327,7 @@ run_test 'rollback 成功时不动作'                       test_rollback_succe
 run_test 'rollback 清理临时文件'                       test_rollback_tmpfile_cleanup
 run_test 'rollback 同步 state 清单'                    test_rollback_state_snapshot
 run_test 'rollback keep-going 保留清单'                test_rollback_keepgoing_keeps_state
+run_test 'rollback verify 失败不动作'                  test_rollback_verify_noop
 run_test 'util 基础与 IPv4/sudo'                       test_util
 run_test 'with_retry 成功/耗尽/用法'                   test_with_retry
 run_test '代理端点推导与校验'                          test_resolve_proxy_endpoint
@@ -1140,6 +1353,8 @@ run_test 'nosuspend 会话判断'                          test_action_nosuspend
 run_test 'ssh 密钥生成/校验/移除'                      test_action_ssh
 run_test 'proxy 写入/幂等/重写/移除'                   test_action_proxy
 run_test 'setup.sh 入口参数与 dry-run'                 test_entry
+run_test 'ui.sh 启动器参数'                            test_ui_launcher
+run_test 'Web UI 忽略规则与文档'                       test_ui_ignores_and_docs
 
 printf '\n总计：PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))
