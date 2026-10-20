@@ -27,9 +27,6 @@ const S = {
   tab: "results",
   collapsedGroups: new Set(),
   logGroups: new Map(),
-  itemLogs: new Map(),
-  openItemLogs: new Set(),
-  itemLogDetails: new Map(),
 };
 
 const MAIN_TABS = ["tools", "runs"];
@@ -511,65 +508,6 @@ function appendLog(line, cls, toolId) {
   }
 }
 
-// ---------- 结果单元格内的按工具、按阶段日志 ----------
-
-function itemLogKey(id, phase) {
-  if (!id) return "";
-  return id + "|" + (phase === "verify" ? "verify" : "install");
-}
-
-function resetItemLogs() {
-  S.itemLogs = new Map();
-  S.openItemLogs = new Set();
-  S.itemLogDetails = new Map();
-}
-
-function appendItemLogLine(box, line) {
-  box.appendChild(make("span", line, "item-log-line"));
-}
-
-function appendItemLog(id, phase, line) {
-  if (!id) return;
-  const key = itemLogKey(id, phase);
-  let lines = S.itemLogs.get(key);
-  if (!lines) {
-    lines = [];
-    S.itemLogs.set(key, lines);
-  }
-  lines.push(line);
-  const node = S.itemLogDetails.get(key);
-  if (!node) return;
-  appendItemLogLine(node.body, line);
-  node.count.textContent = lines.length + " 行";
-  if (node.details.open && $("autoscroll").checked) {
-    node.body.scrollTop = node.body.scrollHeight;
-  }
-}
-
-function resultCell(id, phase, status) {
-  const cell = make("td", null, "result-cell");
-  cell.appendChild(make("span", statusLabel(status), "status status-" + status));
-  const key = itemLogKey(id, phase);
-  const lines = S.itemLogs.get(key) || [];
-  const details = make("details", null, "item-log");
-  details.open = S.openItemLogs.has(key);
-  const title = make("summary", null, "item-log-title");
-  const count = make("span", lines.length ? lines.length + " 行" : "无日志",
-                      "item-log-count");
-  title.appendChild(count);
-  const body = make("div", null, "item-log-body");
-  lines.forEach((line) => appendItemLogLine(body, line));
-  details.appendChild(title);
-  details.appendChild(body);
-  details.addEventListener("toggle", () => {
-    if (details.open) S.openItemLogs.add(key);
-    else S.openItemLogs.delete(key);
-  });
-  cell.appendChild(details);
-  S.itemLogDetails.set(key, { details: details, body: body, count: count });
-  return cell;
-}
-
 function handleItem(event) {
   const id = event.id;
   if (!id) return;
@@ -634,7 +572,6 @@ function renderSummary(ids) {
 function renderResults() {
   const body = $("results");
   clear(body);
-  S.itemLogDetails = new Map();
   const ids = resultIds();
   renderSummary(ids);
   if (!ids.length) {
@@ -648,14 +585,13 @@ function renderResults() {
   ids.forEach((id) => {
     const entry = S.results.get(id) || { install: null, verify: null };
     const row = document.createElement("tr");
-    row.appendChild(make("td", id, "result-tool"));
+    row.appendChild(make("td", id));
     const install = entry.install || "not_run";
     const verify = entry.verify || "not_run";
-    row.appendChild(resultCell(id, "install", install));
-    row.appendChild(resultCell(id, "verify", verify));
+    row.appendChild(make("td", statusLabel(install), "status status-" + install));
+    row.appendChild(make("td", statusLabel(verify), "status status-" + verify));
     if (install === "failed" || verify === "failed") row.className = "failed-row";
-    row.addEventListener("click", (ev) => {
-      if (ev.target.closest(".item-log")) return;
+    row.addEventListener("click", () => {
       if (install !== "failed" && verify !== "failed") return;
       highlightLog(id);
     });
@@ -732,7 +668,6 @@ function connectEvents(runId) {
   source.addEventListener("log", (ev) => {
     const data = JSON.parse(ev.data);
     appendLog(data.line, "", data.id);
-    appendItemLog(data.id, data.phase, data.line);
   });
   source.addEventListener("plan", (ev) => {
     handlePlanEvent(JSON.parse(ev.data));
@@ -775,7 +710,6 @@ async function checkStatus() {
   try {
     const data = await api("GET", "/api/status?pick=" + encodeURIComponent(pick.join(",")));
     S.results = new Map();
-    resetItemLogs();
     S.rollingBack = false;
     clearRollbackBanner();
     (data.items || []).forEach((item) => {
@@ -785,15 +719,11 @@ async function checkStatus() {
       else entry.install = item.status || null;
       S.results.set(item.id, entry);
     });
-    clearLog();
-    (data.logs || []).forEach((line) => {
-      const id = logIdFromLine(line);
-      appendLog(line, "", id);
-      if (id) appendItemLog(id, "verify", line);
-    });
     renderResults();
     setMainTab("runs");
     setTab("results");
+    clearLog();
+    (data.logs || []).forEach((line) => appendLog(line, "", logIdFromLine(line)));
     if (data.exit !== undefined) {
       toast("状态检查结束（rc=" + data.exit + "）", data.exit === 0 ? "ok" : "warn");
     }
@@ -822,7 +752,6 @@ async function startRun(verb) {
   clearLog();
   clearRollbackBanner();
   S.results = new Map();
-  resetItemLogs();
   S.rollingBack = false;
   renderResults();
   $("current-item").hidden = true;
@@ -947,25 +876,18 @@ async function loadHistory(runId) {
   try {
     const data = await api("GET", "/api/history/" + encodeURIComponent(runId));
     S.results = new Map();
-    resetItemLogs();
     S.rollingBack = false;
     clearRollbackBanner();
     (data.events || []).forEach((event) => {
       if (event.event === "item_end") handleItem(event);
       if (event.event === "rollback") S.rollingBack = true;
     });
-    clearLog();
-    const meta = data.log_meta || [];
-    (data.log || "").split("\n").forEach((line, index) => {
-      if (!line) return;
-      const entry = meta[index] || {};
-      const id = entry.id || logIdFromLine(line);
-      const phase = entry.phase === "verify" ? "verify" : "install";
-      appendLog(line, "", id);
-      if (id) appendItemLog(id, phase, line);
-    });
     renderResults();
     renderTools();
+    clearLog();
+    (data.log || "").split("\n").forEach((line) => {
+      if (line) appendLog(line, "", logIdFromLine(line));
+    });
     $("log").scrollTop = 0;
     setMainTab("runs");
     setTab("results");

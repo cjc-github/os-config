@@ -707,37 +707,11 @@ class Handler(BaseHTTPRequestHandler):
             log = raw[-_HISTORY_LOG_LIMIT:].decode("utf-8", errors="replace")
         except OSError:
             pass
-        meta_entries: list[dict] = []
-        try:
-            meta_lines = (run_dir / "log-meta.jsonl").read_text(
-                encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            meta_lines = []
-        for raw_meta in meta_lines:
-            raw_meta = raw_meta.strip()
-            if not raw_meta:
-                continue
-            try:
-                entry = json.loads(raw_meta)
-            except json.JSONDecodeError:
-                entry = {}
-            if not isinstance(entry, dict):
-                entry = {}
-            meta_entries.append({
-                "id": entry.get("id"),
-                "phase": entry.get("phase"),
-            })
-        log_line_count = len(log.splitlines())
-        if len(meta_entries) < log_line_count:
-            meta_entries = [{}] * (log_line_count - len(meta_entries)) + meta_entries
-        else:
-            meta_entries = meta_entries[-log_line_count:] if log_line_count else []
         self._send_json(HTTPStatus.OK, {
             "run_id": run_id,
             "meta": meta,
             "events": events,
             "log": log,
-            "log_meta": meta_entries,
         }, self._cookie_headers())
 
     # -- installed / status / history --------------------------------------
@@ -903,8 +877,6 @@ class RunJob:
         self._run_dir = self.config.state_dir / "ui" / "runs" / self.run_id
         self._events_path = self._run_dir / "events.jsonl"
         self._log_path = self._run_dir / "run.log"
-        self._log_meta_path = self._run_dir / "log-meta.jsonl"
-        self._phase: str | None = None
         self._log_lines: deque[str] = deque(maxlen=2000)
         self._event_offset = 0
         self._event_bytes = b""
@@ -1039,9 +1011,6 @@ class RunJob:
         fd = os.open(self._log_path,
                      os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         os.close(fd)
-        fd = os.open(self._log_meta_path,
-                     os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        os.close(fd)
 
     def _write_meta(self) -> None:
         self._atomic_write_json(self._run_dir / "meta.json", {
@@ -1135,7 +1104,6 @@ class RunJob:
             self.running = False
 
     def _run_phase(self, verb: str) -> int:
-        self._phase = "verify" if verb == "verify" else "install"
         cmd = list(self.config.setup_cmd or [])
         cmd.append(verb)
         cmd += ["--pick", *self.pick]
@@ -1250,18 +1218,8 @@ class RunJob:
                 and _LOG_ITEM_RE.match(line):
             # 前缀比事件尾部更实时：用它校正当前条目，供后续无前缀行归属。
             self._current_item = tool_id
-        try:
-            with open(self._log_meta_path, "a", encoding="utf-8") as handle:
-                json.dump({"id": tool_id, "phase": self._phase}, handle)
-                handle.write("\n")
-        except OSError:
-            pass
-        self.server.event_bus.publish("log", {
-            "run_id": self.run_id,
-            "line": line,
-            "id": tool_id,
-            "phase": self._phase,
-        })
+        self.server.event_bus.publish(
+            "log", {"run_id": self.run_id, "line": line, "id": tool_id})
 
 
 def make_server(config: AppConfig) -> UIServer:

@@ -327,19 +327,6 @@ class RunTests(ServerFixture):
         self.assertEqual(phases, {"install", "verify"})
         self.assertEqual(d["meta"]["verify_rc"], 0)
 
-    def test_history_log_meta_tracks_phase(self):
-        code, body = self.post("/api/run", {"verb": "install", "pick": ["git"],
-                                            "verify_after": True})
-        self.assertEqual(code, 202)
-        d = self.wait_meta(json.loads(body)["run_id"])
-        lines = d["log"].splitlines()
-        self.assertEqual(len(d["log_meta"]), len(lines))
-        phases = dict(zip(lines, [m.get("phase") for m in d["log_meta"]]))
-        self.assertEqual(phases.get("line one install"), "install")
-        self.assertEqual(phases.get("line one verify"), "verify")
-        tagged = [m for m in d["log_meta"] if m.get("id") == "git"]
-        self.assertTrue(tagged, d["log_meta"])
-
     def test_failed_install_skips_verify(self):
         code, body = self.post("/api/run", {"verb": "install", "pick": ["apt:failpkg"],
                                             "verify_after": True})
@@ -422,20 +409,6 @@ class SseTests(ServerFixture):
         tagged = [data for data in logs if data.get("id") == "git"]
         self.assertTrue(tagged, logs)
         self.assertTrue(any("tagged" in data["line"] for data in tagged))
-        self.wait_idle()
-
-    def test_log_events_carry_phase(self):
-        code, body = self.post("/api/run", {"verb": "install", "pick": ["git"],
-                                            "verify_after": True})
-        self.assertEqual(code, 202, body)
-        run_id = json.loads(body)["run_id"]
-        events = self.sse("?run_id=" + run_id)
-        logs = [e["data"] for e in events if e["event"] == "log"]
-        self.assertTrue(logs)
-        self.assertTrue(all(d.get("phase") in {"install", "verify"} for d in logs))
-        phases = {d["line"]: d["phase"] for d in logs}
-        self.assertEqual(phases.get("line one install"), "install")
-        self.assertEqual(phases.get("line one verify"), "verify")
         self.wait_idle()
 
 class InstalledTests(ServerFixture):
@@ -576,16 +549,6 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("max-width: 1280px", css)
         self.assertIn("width: 100%", css)
         self.assertIn("min-height: 100%", css)
-
-    def test_results_cells_show_item_logs(self):
-        root = Path(__file__).resolve().parents[1] / "ui" / "static"
-        js = (root / "app.js").read_text(encoding="utf-8")
-        for token in ["S.itemLogs", "S.openItemLogs", "function itemLogKey",
-                      "function appendItemLog", "data.phase", "item-log-body"]:
-            self.assertIn(token, js)
-        css = (root / "style.css").read_text(encoding="utf-8")
-        for token in [".item-log", ".item-log-body", ".item-log-line"]:
-            self.assertIn(token, css)
 
     def test_panels_fill_viewport(self):
         root = Path(__file__).resolve().parents[1] / "ui" / "static"
