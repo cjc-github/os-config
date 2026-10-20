@@ -36,6 +36,8 @@
 
 * { box-sizing: border-box; }
 
+html, body { height: 100%; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -46,8 +48,10 @@ body {
 }
 
 #app {
-  max-width: 1280px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  min-height: 100%;
+  margin: 0;
   padding: 18px 16px 28px;
   display: flex;
   flex-direction: column;

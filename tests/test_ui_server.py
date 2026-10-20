@@ -541,3 +541,11 @@ class FrontendTests(unittest.TestCase):
         for token in [".params-scroll", ".results-scroll", ".log-group",
                       "overflow-y: auto", "position: sticky"]:
             self.assertIn(token, css)
+
+    def test_fullscreen_layout(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        css = (root / "style.css").read_text(encoding="utf-8")
+        self.assertIn("max-width: none", css)
+        self.assertNotIn("max-width: 1280px", css)
+        self.assertIn("width: 100%", css)
+        self.assertIn("min-height: 100%", css)
