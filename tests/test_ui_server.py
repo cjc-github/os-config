@@ -96,6 +96,22 @@ class PathTests(unittest.TestCase):
                     "20261020-120000", "20261020-120000-abc.log"]:
             self.assertIsNone(schema.safe_run_id(bad))
 
+class LogAttributionTests(unittest.TestCase):
+    def test_level_prefixed_item_line(self):
+        self.assertEqual(
+            server_mod._log_item_id("[INFO] [git] setting user", None), "git")
+
+    def test_fallback_to_current_item(self):
+        self.assertEqual(
+            server_mod._log_item_id("       $ git config --global x", "git"), "git")
+
+    def test_dotted_bracket_is_not_an_item(self):
+        self.assertIsNone(
+            server_mod._log_item_id("[ERROR] [install.sh] 命令失败：", None))
+
+    def test_no_context(self):
+        self.assertIsNone(server_mod._log_item_id("=== install ===", None))
+
 class ServerFixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -250,6 +266,7 @@ emit "{\"event\":\"item_start\",\"id\":\"git\",\"verb\":\"$phase\",\"phase\":\"$
 [[ " $* " == *" --dry-run "* ]] && st=planned || st=ok
 emit "{\"event\":\"item_end\",\"id\":\"git\",\"verb\":\"$phase\",\"phase\":\"$phase\",\"type\":\"config\",\"status\":\"$st\",\"rc\":0}"
 echo "line two $phase"
+echo "[INFO] [git] tagged $phase"
 echo "API_KEY=supersecret"
 sleep 0.4
 if [[ " $* " == *"failpkg"* ]]; then exit 1; fi
@@ -383,6 +400,17 @@ class SseTests(ServerFixture):
         code, _, _ = self.get("/api/events?run_id=../x", token="tok", timeout=2)
         self.assertEqual(code, 400)
 
+    def test_log_events_carry_item_id(self):
+        run_id = self.start_run()
+        events = self.sse("?run_id=" + run_id)
+        logs = [e["data"] for e in events if e["event"] == "log"]
+        self.assertTrue(logs)
+        self.assertTrue(all("id" in data for data in logs))
+        tagged = [data for data in logs if data.get("id") == "git"]
+        self.assertTrue(tagged, logs)
+        self.assertTrue(any("tagged" in data["line"] for data in tagged))
+        self.wait_idle()
+
 class InstalledTests(ServerFixture):
     @classmethod
     def setUpClass(cls):
@@ -495,4 +523,21 @@ class FrontendTests(unittest.TestCase):
             self.assertIn(token, js)
         css = (root / "style.css").read_text(encoding="utf-8")
         for token in [".maintabs", ".maintab.is-active", ".plan-strip"]:
+            self.assertIn(token, css)
+
+    def test_fixed_scroll_and_per_tool_logs(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        for elem_id in ["params-scroll", "results-scroll"]:
+            self.assertIn(f'id="{elem_id}"', html)
+        self.assertIn('class="params-scroll"', html)
+        self.assertIn('class="results-scroll"', html)
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["S.collapsedGroups", 'make("details"', 'make("summary"',
+                      "S.logGroups", "function appendLog(line, cls, toolId)",
+                      "logIdFromLine", "data.id"]:
+            self.assertIn(token, js)
+        css = (root / "style.css").read_text(encoding="utf-8")
+        for token in [".params-scroll", ".results-scroll", ".log-group",
+                      "overflow-y: auto", "position: sticky"]:
             self.assertIn(token, css)

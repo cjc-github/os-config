@@ -25,6 +25,8 @@ const S = {
   rollingBack: false,
   mainTab: "tools",
   tab: "results",
+  collapsedGroups: new Set(),
+  logGroups: new Map(),
 };
 
 const MAIN_TABS = ["tools", "runs"];
@@ -342,8 +344,13 @@ function renderParams() {
     return;
   }
   groups.forEach((group) => {
-    const section = make("fieldset", null, "param-group");
-    section.appendChild(make("legend", group.title || group.id));
+    const section = make("details", null, "param-group");
+    section.open = !S.collapsedGroups.has(group.id);
+    section.appendChild(make("summary", group.title || group.id, "param-group-title"));
+    section.addEventListener("toggle", () => {
+      if (section.open) S.collapsedGroups.delete(group.id);
+      else S.collapsedGroups.add(group.id);
+    });
     (group.fields || []).forEach((field) => {
       const line = make("div", null, "param-row");
       const label = make("label", field.label || field.key, "param-label");
@@ -458,12 +465,47 @@ function setRunning(running) {
 
 function clearLog() {
   clear($("log"));
+  S.logGroups = new Map();
 }
 
-function appendLog(line, cls) {
+// 与服务端 _LOG_ITEM_RE 一致：`[INFO] [git] ...` 的第一段才是条目 id。
+const LOG_ITEM_RE = /^\[(?:INFO|OK|WARN|ERROR|DEBUG)\]\s+\[([A-Za-z0-9][A-Za-z0-9_-]*)\]/;
+
+function logIdFromLine(line) {
+  const match = LOG_ITEM_RE.exec(line || "");
+  return match ? match[1] : null;
+}
+
+function logGroup(toolId) {
+  const key = toolId || "";
+  const existing = S.logGroups.get(key);
+  if (existing) return existing;
+  const section = make("details", null, "log-group");
+  section.open = true;
+  if (toolId) section.setAttribute("data-tool", toolId);
+  const title = make("summary", null, "log-group-title");
+  title.appendChild(make("span", toolId || "未归属", "log-group-name"));
+  const count = make("span", "0", "log-group-count");
+  title.appendChild(count);
+  const body = make("div", null, "log-group-body");
+  section.appendChild(title);
+  section.appendChild(body);
+  $("log").appendChild(section);
+  const group = { section: section, body: body, count: count, lines: 0 };
+  S.logGroups.set(key, group);
+  return group;
+}
+
+function appendLog(line, cls, toolId) {
+  const group = logGroup(toolId);
   const row = make("span", line, "log-line" + (cls ? " " + cls : ""));
-  $("log").appendChild(row);
-  if ($("autoscroll").checked) $("log").scrollTop = $("log").scrollHeight;
+  group.body.appendChild(row);
+  group.lines += 1;
+  group.count.textContent = String(group.lines);
+  if ($("autoscroll").checked) {
+    group.body.scrollTop = group.body.scrollHeight;
+    $("log").scrollTop = $("log").scrollHeight;
+  }
 }
 
 function handleItem(event) {
@@ -559,20 +601,22 @@ function renderResults() {
 
 function highlightLog(id) {
   const needle = "[" + id + "]";
-  const lines = $("log").querySelectorAll(".log-line");
+  const group = S.logGroups.get(id);
+  const lines = Array.from($("log").querySelectorAll(".log-line"));
   lines.forEach((line) => line.classList.remove("highlight"));
-  let first = null;
-  lines.forEach((line) => {
-    if ((line.textContent || "").indexOf(needle) !== -1) {
-      line.classList.add("highlight");
-      if (!first) first = line;
-    }
+  const matches = lines.filter((line) => {
+    if (group && group.body.contains(line)) return true;
+    return (line.textContent || "").indexOf(needle) !== -1;
   });
-  if (first) {
+  matches.forEach((line) => {
+    line.classList.add("highlight");
+    const owner = line.closest(".log-group");
+    if (owner) owner.open = true;
+  });
+  if (matches.length) {
     setMainTab("runs");
     setTab("log");
-    if (!$("autoscroll").checked) first.scrollIntoView({ block: "center" });
-    else $("log").scrollTop = first.offsetTop - 40;
+    matches[0].scrollIntoView({ block: "center" });
   } else {
     toast("日志中没有找到 " + needle);
   }
@@ -623,7 +667,7 @@ function connectEvents(runId) {
   });
   source.addEventListener("log", (ev) => {
     const data = JSON.parse(ev.data);
-    appendLog(data.line, "");
+    appendLog(data.line, "", data.id);
   });
   source.addEventListener("plan", (ev) => {
     handlePlanEvent(JSON.parse(ev.data));
@@ -679,7 +723,7 @@ async function checkStatus() {
     setMainTab("runs");
     setTab("results");
     clearLog();
-    (data.logs || []).forEach((line) => appendLog(line));
+    (data.logs || []).forEach((line) => appendLog(line, "", logIdFromLine(line)));
     if (data.exit !== undefined) {
       toast("状态检查结束（rc=" + data.exit + "）", data.exit === 0 ? "ok" : "warn");
     }
@@ -842,7 +886,7 @@ async function loadHistory(runId) {
     renderTools();
     clearLog();
     (data.log || "").split("\n").forEach((line) => {
-      if (line) appendLog(line);
+      if (line) appendLog(line, "", logIdFromLine(line));
     });
     $("log").scrollTop = 0;
     setMainTab("runs");

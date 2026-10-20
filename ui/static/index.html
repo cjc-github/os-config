@@ -66,7 +66,9 @@
 
       <section class="panel params-panel">
         <div class="panel-head"><h2>参数</h2></div>
-        <div id="params" class="params"></div>
+        <div id="params-scroll" class="params-scroll">
+          <div id="params" class="params"></div>
+        </div>
         <div class="options">
           <label class="check-line">
             <input id="keep-going" type="checkbox" checked>
@@ -113,12 +115,14 @@
           <span id="result-summary" class="hint">选择工具后，这里会显示每一项的执行结果。</span>
           <span class="hint">点击失败行可在日志中定位</span>
         </div>
-        <table class="results">
-          <thead>
-            <tr><th>工具</th><th>安装结果</th><th>校验结果</th></tr>
-          </thead>
-          <tbody id="results"></tbody>
-        </table>
+        <div id="results-scroll" class="results-scroll">
+          <table class="results">
+            <thead>
+              <tr><th>工具</th><th>安装结果</th><th>校验结果</th></tr>
+            </thead>
+            <tbody id="results"></tbody>
+          </table>
+        </div>
       </div>
 
       <div id="panel-log" class="tab-panel" role="tabpanel" aria-labelledby="log-tab" hidden>
@@ -133,7 +137,7 @@
             <button id="log-download" type="button" class="ghost">下载</button>
           </div>
         </div>
-        <pre id="log" class="log" tabindex="0"></pre>
+        <div id="log" class="log" tabindex="0"></div>
       </div>
 
       <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="history-tab" hidden>

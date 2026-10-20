@@ -131,6 +131,20 @@ def _redact(line: str) -> str:
     return line
 
 
+# 引擎的 log_info/ok/warn/error 输出形如 `[INFO] [git] ...`；工具 id 不含点，
+# 避免把 rollback 脚本里的 `[install.sh]` 误认成条目。
+_LOG_ITEM_RE = re.compile(
+    r"^\[(?:INFO|OK|WARN|ERROR|DEBUG)\]\s+\[([A-Za-z0-9][A-Za-z0-9_-]*)\]")
+
+
+def _log_item_id(line: str, current: str | None) -> str | None:
+    """从一行日志推断所属工具；无前缀时回落到当前执行中的条目。"""
+    match = _LOG_ITEM_RE.match(line)
+    if match:
+        return match.group(1)
+    return current
+
+
 def _pick_ids(pick: list[str]) -> list[str]:
     """把 pick token 转成规范化后的工具 id（内联 token 与 profile.sh 规则一致）。"""
     return [schema.normalize_adhoc_id(token)[0] if ":" in token else token
@@ -867,6 +881,7 @@ class RunJob:
         self._event_offset = 0
         self._event_bytes = b""
         self._run_end: dict | None = None
+        self._current_item: str | None = None
 
     # -- 启动与锁 -----------------------------------------------------------
     def start(self) -> bool:
@@ -1163,6 +1178,10 @@ class RunJob:
             return
         name = event.get("event")
         if name in ("item_start", "item_end"):
+            if name == "item_start":
+                self._current_item = event.get("id") or None
+            elif event.get("id") in (None, self._current_item):
+                self._current_item = None
             self.server.event_bus.publish("item", {**event, "run_id": self.run_id})
             if name == "item_end":
                 status = event.get("status")
@@ -1194,8 +1213,13 @@ class RunJob:
                 handle.write(line + "\n")
         except OSError:
             pass
+        tool_id = _log_item_id(line, self._current_item)
+        if tool_id is not None and tool_id != self._current_item \
+                and _LOG_ITEM_RE.match(line):
+            # 前缀比事件尾部更实时：用它校正当前条目，供后续无前缀行归属。
+            self._current_item = tool_id
         self.server.event_bus.publish(
-            "log", {"run_id": self.run_id, "line": line})
+            "log", {"run_id": self.run_id, "line": line, "id": tool_id})
 
 
 def make_server(config: AppConfig) -> UIServer:
