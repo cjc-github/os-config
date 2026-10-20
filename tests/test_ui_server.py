@@ -559,3 +559,12 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("height: 460px", css)
         self.assertNotIn("height: 380px", css)
         self.assertNotIn("height: 420px", css)
+
+    def test_log_body_uses_full_height(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        css = (root / "style.css").read_text(encoding="utf-8")
+        log_rule = css.split(".log {", 1)[1].split("}", 1)[0]
+        self.assertIn("overflow: auto", log_rule)
+        body_rule = css.split(".log-group-body {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("max-height", body_rule)
+        self.assertNotIn("overflow-y", body_rule)

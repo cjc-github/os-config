@@ -527,9 +527,6 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
   font-variant-numeric: tabular-nums;
 }
 .log-group-body {
-  max-height: 240px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
   padding: 8px 12px;
 }
 .log-group:not([open]) > .log-group-body { display: none; }
