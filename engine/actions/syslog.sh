@@ -32,6 +32,10 @@ _syslog_strip_aliases() {
   local file="$1"
   [[ -f "$file" ]] || return 0
   file_contains "$file" "$_SYSLOG_ALIAS_BEGIN" || return 0
+  if ! file_contains "$file" "$_SYSLOG_ALIAS_END"; then
+    log_error "oslogs 托管块缺少结束标记，拒绝删除：$file"
+    return 1
+  fi
   sed -i -E "/$_SYSLOG_ALIAS_BEGIN/,/$_SYSLOG_ALIAS_END/d" "$file"
 }
 
@@ -45,7 +49,7 @@ action_syslog_apply() {
   batcat_link="$(_syslog_bat_link)"
   if cmd_exists batcat && ! cmd_exists bat; then
     batcat_bin="$(command -v batcat)"
-    run_step "链接 bat -> batcat（$batcat_link）" \
+    run_step "创建 bat 软链目录（$(dirname "$batcat_link")）" \
       install -d -m 0755 "$(dirname "$batcat_link")" || return 1
     run_step "创建软链 $batcat_link" ln -sf "$batcat_bin" "$batcat_link" || return 1
   elif ! cmd_exists batcat && ! cmd_exists bat; then
@@ -53,7 +57,8 @@ action_syslog_apply() {
   fi
 
   # --- journald drop-in ---
-  tmp="$(mktemp)"; register_tmpfile "$tmp"
+  tmp="$(util_mktemp 'journald drop-in 临时文件')" || return 1
+  register_tmpfile "$tmp"
   {
     printf '[Journal]\n'
     printf 'Storage=persistent\n'
@@ -82,14 +87,14 @@ action_syslog_apply() {
   if [[ -f "$bashrc" ]] && file_contains "$bashrc" "$_SYSLOG_ALIAS_BEGIN"; then
     if [[ "${FORCE:-0}" == 1 ]]; then
       register_rollback "$bashrc"
-      _syslog_strip_aliases "$bashrc"
+      _syslog_strip_aliases "$bashrc" || return 1
     else
       log_info "[$id] $bashrc 已含 oslogs 别名，跳过重写（--force 可重写）"
       bashrc=""
     fi
   else
-    register_rollback "$bashrc"
-    touch -- "$bashrc" 2>/dev/null || true
+    register_rollback "$bashrc" || return 1
+    touch -- "$bashrc" || { log_error "[$id] 无法创建 $bashrc"; return 1; }
   fi
 
   if [[ -n "$bashrc" ]]; then
@@ -101,7 +106,7 @@ action_syslog_apply() {
       printf "alias oslogs-syslog='sudo journalctl -e --no-pager | tail -n 200'\n"
       printf "alias oslogs='oslogs-system && echo \"---auth---\" && oslogs-auth && echo \"---apt---\" && oslogs-apt'\n"
       printf '%s\n' "$_SYSLOG_ALIAS_END"
-    } >>"$bashrc"
+    } >>"$bashrc" || { log_error "[$id] 写入 oslogs 别名失败：$bashrc"; return 1; }
     log_ok "[$id] oslogs 别名已写入 $bashrc（新 shell 生效）"
   fi
 
@@ -113,7 +118,7 @@ action_syslog_apply() {
 }
 
 action_syslog_remove() {
-  local id="$1" bashrc="$HOME/.bashrc" batcat_link
+  local id="$1" bashrc="$HOME/.bashrc" batcat_link rc=0
   require_sudo || return 1
 
   if sudo test -e "$_SYSLOG_DROPIN"; then
@@ -126,14 +131,24 @@ action_syslog_remove() {
 
   if [[ -f "$bashrc" ]] && file_contains "$bashrc" "$_SYSLOG_ALIAS_BEGIN"; then
     register_rollback "$bashrc"
-    _syslog_strip_aliases "$bashrc"
+    _syslog_strip_aliases "$bashrc" || return 1
     log_ok "[$id] 已移除 oslogs 别名块"
   fi
 
   batcat_link="$(_syslog_bat_link)"
   if [[ -L "$batcat_link" ]]; then
-    rm -f -- "$batcat_link" && log_ok "[$id] 已移除软链：$batcat_link"
+    if [[ "$(basename -- "$(readlink -- "$batcat_link")")" == "batcat" ]]; then
+      if rm -f -- "$batcat_link"; then
+        log_ok "[$id] 已移除软链：$batcat_link"
+      else
+        log_error "[$id] 移除软链失败：$batcat_link"
+        rc=1
+      fi
+    else
+      log_info "[$id] 软链非本动作创建，保留：$batcat_link"
+    fi
   fi
+  (( rc == 0 )) || return 1
   log_ok "[$id] 日志配置已还原"
 }
 

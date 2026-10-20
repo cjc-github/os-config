@@ -13,6 +13,7 @@ import queue
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from ui import schema
+
+
+# 请求体上限：本 UI 的最大载荷是参数表单与 pick 列表，1 MiB 已远超实际需要。
+_MAX_BODY_BYTES = 1 << 20
+# 计划生成只做本地解析，正常远低于此值；超时保证 handler 不被卡死。
+_PLAN_TIMEOUT = 60
 
 
 @dataclass
@@ -259,6 +266,10 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.UNAUTHORIZED, "unauthorized")
             return
         self._body = self._read_body()
+        if self._body is None:
+            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        "request body too large")
+            return
         if self.headers.get_content_type() != "application/json":
             self._error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
                         "Content-Type must be application/json")
@@ -276,13 +287,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
-    def _read_body(self) -> bytes:
+    def _read_body(self) -> bytes | None:
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError:
             length = 0
         if length <= 0:
             return b""
+        if length > _MAX_BODY_BYTES:
+            # 不读取也不等待声明长度的 body；HTTP/1.1 下必须断开连接，
+            # 否则残余字节会被当成下一个请求解析。
+            self.close_connection = True
+            return None
         return self.rfile.read(length)
 
     # -- 静态文件 -----------------------------------------------------------
@@ -350,22 +366,38 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             data = None
+        catalog_ids = {
+            item.get("id") for item in catalog.get("catalog", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
         if isinstance(data, dict):
             tools = data.get("tools")
             adhoc = data.get("adhoc")
             verb = data.get("verb")
+            stale_ok = []
+            for token in tools if isinstance(tools, list) else []:
+                if isinstance(token, str) and token in catalog_ids:
+                    stale_ok.append(token)
+            adhoc_ok = []
+            for token in adhoc if isinstance(adhoc, list) else []:
+                if not isinstance(token, str) or ":" not in token:
+                    continue
+                try:
+                    schema.normalize_adhoc_id(token)
+                except schema.ValidationError:
+                    continue
+                adhoc_ok.append(token)
             return {
-                "tools": [t for t in tools if isinstance(t, str)]
-                if isinstance(tools, list) else [],
-                "adhoc": [t for t in adhoc if isinstance(t, str)]
-                if isinstance(adhoc, list) else [],
+                "tools": stale_ok,
+                "adhoc": adhoc_ok,
                 "verb": verb if isinstance(verb, str) else "install",
             }
         tools: list[str] = []
         for profile in catalog.get("profiles", []):
             if isinstance(profile, dict) and profile.get("name") == "default":
                 raw = profile.get("tools", [])
-                tools = [t for t in raw if isinstance(t, str)]
+                tools = [t for t in raw if isinstance(t, str)
+                         and t in catalog_ids]
                 break
         return {"tools": tools, "adhoc": [], "verb": "install"}
 
@@ -401,6 +433,12 @@ class Handler(BaseHTTPRequestHandler):
             key: value for key, value in merged.items()
             if not schema.PARAM_SPECS[key]["secret"]
         }
+        defaults = {
+            key: value
+            for key, value in schema.read_env_file(
+                self.server.config.project_dir / "config" / "user.env").items()
+            if not schema.PARAM_SPECS[key]["secret"]
+        }
 
         job = self.server.current_job
         if job is None:
@@ -416,6 +454,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, {
             "selection": selection,
             "params": params,
+            "defaults": defaults,
             "secrets": secrets_present,
             "profiles": catalog.get("profiles", []),
             "running": running,
@@ -496,13 +535,19 @@ class Handler(BaseHTTPRequestHandler):
                 bufsize=1,
                 text=True,
                 env=env,
+                # 独立会话：超时时按进程组终止，避免 shell 的子进程
+                # 继续持有 stdout 管道导致 communicate() 永远等不到 EOF。
+                start_new_session=True,
             )
             timed_out = False
             try:
                 out, _ = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    proc.kill()
                 out, _ = proc.communicate()
             logs = [_redact(_ANSI_RE.sub("", line))
                     for line in (out or "").splitlines()]
@@ -525,7 +570,10 @@ class Handler(BaseHTTPRequestHandler):
         return logs, events, rc, timed_out
 
     def _run_dry(self, cmd: list[str]) -> tuple[list[str], list[dict], int]:
-        logs, events, rc, _timed_out = self._capture_process(cmd)
+        logs, events, rc, timed_out = self._capture_process(
+            cmd, timeout=_PLAN_TIMEOUT)
+        if timed_out:
+            logs.append(f"[ERROR] 生成计划超时（{_PLAN_TIMEOUT:g}s），进程已终止")
         return logs, events, rc if rc is not None else 1
 
     def _api_plan(self) -> None:
@@ -624,7 +672,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(frame.encode("utf-8"))
         self.wfile.flush()
 
+    def _finished_run_meta(self, run_id: str) -> dict | None:
+        meta_path = (self.server.config.state_dir / "ui" / "runs"
+                     / run_id / "meta.json")
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(meta, dict) or not meta.get("finished"):
+            return None
+        return meta
+
     def _api_events(self) -> None:
+        if self.command == "HEAD":
+            # SSE 是无限流，HEAD 无法表达且会让处理线程一直挂着。
+            self._error(HTTPStatus.METHOD_NOT_ALLOWED, "HEAD is not supported")
+            return
         query = parse_qs(urlsplit(self.path).query)
         run_filter = (query.get("run_id") or [None])[0]
         if run_filter is not None:
@@ -653,13 +716,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True
+            last_id = 0
             for item in backlog:
                 if after is not None and item[0] <= after:
                     continue
                 if run_filter is not None and item[2].get("run_id") != run_filter:
                     continue
                 self._write_sse(item)
+                last_id = item[0]
                 if run_filter is not None and item[1] == "done":
+                    return
+            # 服务重启后缓冲为空：已完成的 run 不会再有 live 事件，补一帧 done
+            # 让回看连接能正常结束。
+            if run_filter is not None:
+                meta = self._finished_run_meta(run_filter)
+                if meta is not None:
+                    self._write_sse((last_id, "done", {
+                        "run_id": run_filter,
+                        "rc": meta.get("rc"),
+                        "verify_rc": meta.get("verify_rc"),
+                    }))
                     return
             while True:
                 try:
@@ -788,23 +864,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         cmd = list(self.server.config.setup_cmd or [])
         cmd += ["verify", "--pick", _pick_arg(pick), "--keep-going", "--yes"]
+        if not self.server.run_lock.acquire(blocking=False):
+            self._error(HTTPStatus.CONFLICT, "已有任务在运行，无法检查状态")
+            return
         try:
-            logs, events, rc, timed_out = self._capture_process(cmd, timeout=120)
-        except OSError as exc:
-            self._error(HTTPStatus.BAD_GATEWAY, f"setup command failed: {exc}")
-            return
-        if timed_out:
-            self._error(HTTPStatus.GATEWAY_TIMEOUT, "verify timed out after 120s")
-            return
-        items = [
-            {"id": event.get("id"), "phase": event.get("phase", "verify"),
-             "status": event.get("status", ""), "rc": event.get("rc", rc)}
-            for event in events
-            if event.get("event") == "item_end" and isinstance(event.get("id"), str)
-        ]
-        self._send_json(HTTPStatus.OK,
-                        {"items": items, "logs": logs, "exit": rc},
-                        self._cookie_headers())
+            try:
+                logs, events, rc, timed_out = self._capture_process(cmd, timeout=120)
+            except OSError as exc:
+                self._error(HTTPStatus.BAD_GATEWAY, f"setup command failed: {exc}")
+                return
+            if timed_out:
+                self._error(HTTPStatus.GATEWAY_TIMEOUT, "verify timed out after 120s")
+                return
+            items = [
+                {"id": event.get("id"), "phase": event.get("phase", "verify"),
+                 "status": event.get("status", ""), "rc": event.get("rc", rc)}
+                for event in events
+                if event.get("event") == "item_end" and isinstance(event.get("id"), str)
+            ]
+            self._send_json(HTTPStatus.OK,
+                            {"items": items, "logs": logs, "exit": rc},
+                            self._cookie_headers())
+        finally:
+            self.server.run_lock.release()
 
     def _api_history_list(self) -> None:
         runs_dir = self.server.config.state_dir / "ui" / "runs"
@@ -1085,7 +1167,8 @@ class RunJob:
             except Exception as exc:
                 self._emit_log(f"meta write failed: {exc}")
             try:
-                self._write_selection()
+                if self.verb == "install":
+                    self._write_selection()
             except Exception:
                 pass
             self.server.event_bus.publish("summary", {

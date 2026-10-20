@@ -38,6 +38,13 @@ util_trim() {
   printf '%s' "$value"
 }
 
+# util_mktemp <描述> —— 创建临时文件；失败时记录原因并返回非零（不输出路径）
+util_mktemp() {
+  local desc="${1:-临时文件}" f
+  f="$(mktemp)" || { log_error "无法创建${desc}"; return 1; }
+  printf '%s\n' "$f"
+}
+
 # ---------------------------------------------------------------------------
 # 用户交互
 # ---------------------------------------------------------------------------
@@ -157,7 +164,7 @@ npm_install_global_fixed() {
   desc="npm install -g ${pkg}@${version}"
   [[ -z "$registry" ]] || desc+=" (registry=$registry)"
 
-  capture=$(mktemp)
+  capture="$(util_mktemp 'npm 输出捕获文件')" || return 1
   register_tmpfile "$capture"
   if run_step_verbose_capture "$desc" "$capture" "${cmd[@]}"; then
     return 0

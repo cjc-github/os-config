@@ -42,11 +42,15 @@ _proxy_resolve() {
   return "$rc"
 }
 
-# 删除 ~/.bashrc 中的托管块（若存在）
+# 删除 ~/.bashrc 中的托管块（若存在）；缺少结束标记时拒绝删除，避免误删后续内容
 _proxy_strip_block() {
   local file="$1"
   [[ -f "$file" ]] || return 0
   file_contains "$file" "$_PROXY_BEGIN" || return 0
+  if ! file_contains "$file" "$_PROXY_END"; then
+    log_error "托管块缺少结束标记，拒绝删除：$file"
+    return 1
+  fi
   sed -i -E "/$_PROXY_BEGIN/,/$_PROXY_END/d" "$file"
 }
 
@@ -92,16 +96,17 @@ action_proxy_apply() {
     return 0
   fi
 
-  register_rollback "$bashrc"
-  touch -- "$bashrc" 2>/dev/null || true
+  register_rollback "$bashrc" || return 1
+  touch -- "$bashrc" 2>/dev/null || { log_error "[$id] 无法创建或访问 $bashrc"; return 1; }
 
   if [[ -n "$cur" ]]; then
     [[ "${FORCE:-0}" == 1 ]] && log_info "[$id] --force 重写 proxy 块" \
       || log_info "[$id] proxy 块内容变化，重写（$RESOLVED_PROXY_URL）"
-    _proxy_strip_block "$bashrc"
+    _proxy_strip_block "$bashrc" || return 1
   fi
 
-  { printf '\n'; _proxy_block_render; } >>"$bashrc"
+  { printf '\n'; _proxy_block_render; } >>"$bashrc" \
+    || { log_error "[$id] 写入失败：$bashrc"; return 1; }
 
   log_ok "[$id] 已写入 proxy 块（$RESOLVED_PROXY_URL）到 $bashrc"
   log_warn "[$id] 新 shell 才生效；当前会话可执行：source ~/.bashrc"
@@ -113,8 +118,8 @@ action_proxy_remove() {
     log_info "[$id] ~/.bashrc 无 os-config proxy 块，无需还原"
     return 0
   fi
-  register_rollback "$bashrc"
-  _proxy_strip_block "$bashrc"
+  register_rollback "$bashrc" || return 1
+  _proxy_strip_block "$bashrc" || return 1
   log_ok "[$id] 已移除 shell 代理块：$bashrc"
 }
 
@@ -146,7 +151,6 @@ action_proxy_verify() {
   fi
   log_ok "[$id] proxy 块存在：HTTPS_PROXY=$proxy_url"
 
-  ensure_proxy_host_reachable "${RESOLVED_PROXY_HOST:-}" "${RESOLVED_PROXY_PORT:-7890}" "" 2>/dev/null || true
   ensure_proxy_curl_connectivity "$proxy_url" "https://github.com" || return 1
   log_ok "[$id] 代理配置校验通过"
 }

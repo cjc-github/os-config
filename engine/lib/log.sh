@@ -16,13 +16,18 @@ _log_file_init() {
   if [[ -z "${LOG_FILE-}" ]]; then
     logdir="${PROJECT_DIR:-.}/logs"
     LOG_FILE="$logdir/setup-$(date +%Y%m%d-%H%M%S).$$.log"
-    export LOG_FILE
   else
     logdir="$(dirname "$LOG_FILE")"
   fi
-  mkdir -p -- "$logdir"
+  # 目录/文件不可写时降级为仅终端输出：否则每条日志都会向 stderr 抛红定向错误，
+  # 既淹没真正的失败信息，也让人误以为日志已落盘。
+  if ! mkdir -p -- "$logdir" 2>/dev/null || ! touch -- "$LOG_FILE" 2>/dev/null; then
+    printf '[WARN] 无法写入日志文件：%s（本次仅输出到终端）\n' "$LOG_FILE" >&2
+    LOG_FILE=""
+  fi
+  export LOG_FILE
+  [[ -n "$LOG_FILE" ]] || return 0
   chmod 700 -- "$logdir" 2>/dev/null || true
-  touch -- "$LOG_FILE"
   chmod 600 -- "$LOG_FILE" 2>/dev/null || true
 }
 _log_file_init
@@ -63,4 +68,4 @@ log_command() {
 }
 log_section() { printf '\n%s=== %s ===%s\n' "$_C_SECT" "$*" "$_C_RESET" >&2
                 [[ -z "${LOG_FILE-}" ]] || printf '\n=== %s ===\n' "$*" >>"$LOG_FILE"; }
-log_path() { echo "$LOG_FILE"; }
+log_path() { printf '%s\n' "${LOG_FILE:-<未落盘>}"; }

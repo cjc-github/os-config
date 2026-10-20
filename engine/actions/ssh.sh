@@ -33,8 +33,11 @@ _ssh_key_type() {
 }
 
 action_ssh_apply() {
-  local id="$1" type keyfile comment dir
+  local id="$1" type keyfile comment dir passphrase
   type="$(_ssh_key_type)" || return $?
+  # _ssh_key_type 在命令替换的子 shell 中执行，其默认值无法回传到本函数；
+  # 这里自行兜底，避免 set -u 下引用未绑定的 SSH_KEY_PASSPHRASE。
+  passphrase="${SSH_KEY_PASSPHRASE:-}"
   if ! cmd_exists ssh-keygen; then
     log_error "[$id] ssh-keygen 不可用；请先安装其依赖 openssh-client"
     return 1
@@ -50,13 +53,22 @@ action_ssh_apply() {
     comment="${USER:-$(id -un)}@$(hostname) $(date +%Y%m%d)"
     if [[ "$type" == ed25519 ]]; then
       run_step "ssh-keygen ed25519" \
-        ssh-keygen -t ed25519 -N "$SSH_KEY_PASSPHRASE" -C "$comment" -f "$keyfile" || return 1
+        ssh-keygen -t ed25519 -N "$passphrase" -C "$comment" -f "$keyfile" || return 1
     else
       run_step "ssh-keygen rsa 4096" \
-        ssh-keygen -t rsa -b 4096 -N "$SSH_KEY_PASSPHRASE" -C "$comment" -f "$keyfile" || return 1
+        ssh-keygen -t rsa -b 4096 -N "$passphrase" -C "$comment" -f "$keyfile" || return 1
     fi
-    dir="$(_ssh_action_dir)"
-    printf '%s\n%s\n' "$keyfile" "${keyfile}.pub" >>"$dir/created.txt"
+    dir="$(_ssh_action_dir)" || {
+      # 密钥已生成但无法登记；不清理会变成 remove 永远删不掉的孤儿文件。
+      log_error "[$id] 无法记录密钥来源，已回滚：$keyfile"
+      rm -f -- "$keyfile" "${keyfile}.pub"
+      return 1
+    }
+    if ! printf '%s\n%s\n' "$keyfile" "${keyfile}.pub" >>"$dir/created.txt"; then
+      log_error "[$id] 无法记录密钥来源，已回滚：$keyfile"
+      rm -f -- "$keyfile" "${keyfile}.pub"
+      return 1
+    fi
     log_ok "[$id] 已生成密钥：$keyfile"
   fi
 
@@ -66,7 +78,7 @@ action_ssh_apply() {
 }
 
 action_ssh_remove() {
-  local id="$1" dir list f
+  local id="$1" dir list f rc=0
   dir="$(state_action_dir ssh)"
   list="$dir/created.txt"
   if [[ ! -s "$list" ]]; then
@@ -76,9 +88,18 @@ action_ssh_remove() {
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     if [[ -f "$f" ]]; then
-      rm -f -- "$f" && log_ok "[$id] 已删除：$f"
+      if rm -f -- "$f"; then
+        log_ok "[$id] 已删除：$f"
+      else
+        log_error "[$id] 删除失败：$f"
+        rc=1
+      fi
     fi
   done <"$list"
+  if (( rc != 0 )); then
+    log_warn "[$id] 部分密钥删除失败，保留记录以便重试：$list"
+    return 1
+  fi
   rm -rf -- "$dir"
   log_ok "[$id] 已清理本动作创建的 SSH 密钥"
 }

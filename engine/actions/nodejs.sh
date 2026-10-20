@@ -39,7 +39,7 @@ _nodejs_npm_set_if_different() {
   local k="$1" v="$2" name="${3:-$1}" cur
   cur=$(npm config get "$k" 2>/dev/null || echo "")
   if [[ "$cur" != "$v" || "${FORCE:-0}" == 1 ]]; then
-    run_step "npm config set $name" npm config set "$k" "$v"
+    run_step "npm config set $name" npm config set "$k" "$v" || return 1
   else
     log_debug "npm config $name 已是 $v，跳过"
   fi
@@ -61,7 +61,8 @@ action_nodejs_apply() {
     log_info "[$id] nvm $installed_nvm 已安装，跳过"
   else
     url="https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh"
-    installer="$(mktemp)"; register_tmpfile "$installer"
+    installer="$(util_mktemp 'nvm 安装脚本临时文件')" || return 1
+    register_tmpfile "$installer"
     run_step_verbose "下载 nvm $NVM_VERSION 安装脚本" \
       with_retry 3 2 -- curl -fL# -o "$installer" "$url" || return 1
     # 不让 nvm installer 自动编辑 .bashrc/.profile
@@ -101,12 +102,12 @@ action_nodejs_apply() {
   nvm use --silent "$node_wanted" >/dev/null 2>&1 || true
 
   # --- 4) npm 提速配置 ---
-  [[ -z "$NPM_REGISTRY" ]] || _nodejs_npm_set_if_different registry "$NPM_REGISTRY" "registry $NPM_REGISTRY"
-  _nodejs_npm_set_if_different audit "false"
-  _nodejs_npm_set_if_different fund "false"
-  _nodejs_npm_set_if_different prefer-offline "true"
-  _nodejs_npm_set_if_different fetch-timeout "120000" "fetch-timeout 120s"
-  _nodejs_npm_set_if_different fetch-retry-maxtimeout "120000" "fetch-retry-maxtimeout 120s"
+  [[ -z "$NPM_REGISTRY" ]] || _nodejs_npm_set_if_different registry "$NPM_REGISTRY" "registry $NPM_REGISTRY" || return 1
+  _nodejs_npm_set_if_different audit "false" || return 1
+  _nodejs_npm_set_if_different fund "false" || return 1
+  _nodejs_npm_set_if_different prefer-offline "true" || return 1
+  _nodejs_npm_set_if_different fetch-timeout "120000" "fetch-timeout 120s" || return 1
+  _nodejs_npm_set_if_different fetch-retry-maxtimeout "120000" "fetch-retry-maxtimeout 120s" || return 1
 
   log_ok "[$id] nodejs 完成：node=$(node --version) npm=$(npm --version)"
 }

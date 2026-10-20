@@ -9,11 +9,17 @@ STATE_FILE="${STATE_FILE:-$STATE_DIR/manifest.conf}"
 # 运行期清单快照：失败回滚时把 manifest 还原到本次运行前，
 # 避免出现“文件已回滚、清单仍记录”的不一致。
 STATE_RUN_BAK="${STATE_RUN_BAK:-$STATE_DIR/.manifest.run.bak}"
+# 本次运行是否创建/接管了快照。只读运行与 dry-run 没有快照，绝不能
+# 在退出时把并发写运行正在使用的基线当成自己的删掉或还原。
+declare -g STATE_SNAPSHOT_OWNER=0
 
 state_init() {
-  mkdir -p -- "$STATE_DIR"
+  mkdir -p -- "$STATE_DIR" || { log_error "无法创建状态目录：$STATE_DIR"; return 1; }
   chmod 700 -- "$STATE_DIR" 2>/dev/null || true
-  [[ -f "$STATE_FILE" ]] || { : >"$STATE_FILE"; chmod 600 -- "$STATE_FILE" 2>/dev/null || true; }
+  if [[ ! -f "$STATE_FILE" ]]; then
+    : >"$STATE_FILE" || { log_error "无法创建状态清单：$STATE_FILE"; return 1; }
+    chmod 600 -- "$STATE_FILE" 2>/dev/null || true
+  fi
 }
 
 # state_snapshot —— 运行开始时记录清单快照（幂等：一次运行只取一次）
@@ -21,18 +27,20 @@ state_init() {
 # 本次运行直接复用为回滚基线，而不是重新抓取——即还原点可能早于本次运行开始。
 # 这是有意的保守取舍（宁可多回退，也不丢基线）；若需强制刷新，运行前删除该文件。
 state_snapshot() {
-  state_init
-  [[ -f "$STATE_RUN_BAK" ]] && return 0
+  state_init || return 1
+  [[ -f "$STATE_RUN_BAK" ]] && { STATE_SNAPSHOT_OWNER=1; return 0; }
   if [[ -f "$STATE_FILE" ]]; then
     cp -p -- "$STATE_FILE" "$STATE_RUN_BAK" 2>/dev/null || return 1
     chmod 600 -- "$STATE_RUN_BAK" 2>/dev/null || true
   else
     : >"$STATE_RUN_BAK"
   fi
+  STATE_SNAPSHOT_OWNER=1
 }
 
 # state_restore_snapshot —— 把清单还原到快照（失败回滚用）
 state_restore_snapshot() {
+  [[ "${STATE_SNAPSHOT_OWNER:-0}" == 1 ]] || return 0
   [[ -f "$STATE_RUN_BAK" ]] || return 0
   cp -p -- "$STATE_RUN_BAK" "$STATE_FILE" 2>/dev/null || {
     log_error "清单回滚失败：$STATE_FILE（快照在 $STATE_RUN_BAK）"; return 1
@@ -42,13 +50,14 @@ state_restore_snapshot() {
 
 # state_discard_snapshot —— 丢弃快照（成功提交或 --keep-going 保留改动时）
 state_discard_snapshot() {
+  [[ "${STATE_SNAPSHOT_OWNER:-0}" == 1 ]] || return 0
   rm -f -- "$STATE_RUN_BAK" 2>/dev/null || true
 }
 
 # state_action_dir <name> —— 动作用来保存自己簿记（备份、已创建文件清单）的私有目录
 state_action_dir() {
   local d="$STATE_DIR/actions/$1"
-  mkdir -p -- "$d"
+  mkdir -p -- "$d" || { log_error "无法创建动作状态目录：$d"; return 1; }
   chmod 700 -- "$d" 2>/dev/null || true
   printf '%s\n' "$d"
 }
@@ -57,25 +66,38 @@ state_action_dir() {
 state_record() {
   local tool="$1" action="$2"; shift 2
   local ts; ts=$(date '+%Y-%m-%dT%H:%M:%S')
-  state_init
-  state_forget "$tool"
+  state_init || return 1
+  state_forget "$tool" || return 1
   local artifact
   if [[ $# -eq 0 ]]; then
-    printf '%s|%s|%s|%s\n' "$tool" "$action" "-" "$ts" >>"$STATE_FILE"
+    printf '%s|%s|%s|%s\n' "$tool" "$action" "-" "$ts" >>"$STATE_FILE" \
+      || { log_error "无法写入状态清单：$STATE_FILE"; return 1; }
     return 0
   fi
   for artifact in "$@"; do
-    printf '%s|%s|%s|%s\n' "$tool" "$action" "$artifact" "$ts" >>"$STATE_FILE"
+    printf '%s|%s|%s|%s\n' "$tool" "$action" "$artifact" "$ts" >>"$STATE_FILE" \
+      || { log_error "无法写入状态清单：$STATE_FILE"; return 1; }
   done
 }
 
 # state_forget <tool> —— 删除该工具的清单记录（不删除产物本身）
 state_forget() {
-  local tool="$1" tmp
+  local tool="$1" tmp rc
   [[ -f "$STATE_FILE" ]] || return 0
-  tmp="$(mktemp)"
-  grep -v "^${tool}|" "$STATE_FILE" >"$tmp" 2>/dev/null || true
-  mv -f -- "$tmp" "$STATE_FILE"
+  tmp="$(mktemp)" || { log_error "无法创建临时文件以更新状态清单"; return 1; }
+  # grep 退出码 1 表示没有匹配（正常），>=2 表示读取失败；
+  # 后者若继续 mv，会用空文件覆盖整份清单。
+  grep -v "^${tool}|" "$STATE_FILE" >"$tmp" 2>/dev/null; rc=$?
+  if (( rc > 1 )); then
+    rm -f -- "$tmp"
+    log_error "无法读取状态清单：$STATE_FILE"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$STATE_FILE"; then
+    rm -f -- "$tmp"
+    log_error "无法更新状态清单：$STATE_FILE"
+    return 1
+  fi
 }
 
 # state_artifacts <tool> —— 输出该工具记录的产物路径（"-" 表示无文件产物）

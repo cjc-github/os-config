@@ -35,6 +35,9 @@ def _valid_url(value: str) -> bool:
 
 
 def _valid_host(value: str) -> bool:
+    # 与引擎 resolve_proxy_endpoint 保持一致：首字符为 "-" 会被下游当作选项。
+    if value.startswith("-"):
+        return False
     return value == "" or _PROXY_HOST_RE.fullmatch(value) is not None
 
 
@@ -219,6 +222,8 @@ def validate_pick(tokens: list[str], catalog_ids: set[str]) -> list[str]:
             raise ValidationError("pick 中的每一项都必须是非空字符串")
         if ":" in token:
             ident, _backend, _spec = normalize_adhoc_id(token)
+            if ident in catalog_ids:
+                raise ValidationError(f"内联工具 id 与 catalog 冲突：{ident!r}")
         else:
             if _CATALOG_ID_RE.fullmatch(token) is None or token.startswith("-"):
                 raise ValidationError(f"非法的 catalog 工具 id：{token!r}")
@@ -264,7 +269,7 @@ def apply_param_changes(existing: dict[str, str], params: dict[str, str],
     return merged
 
 
-_QUOTED_RE = re.compile(r"^'(.*)'$", re.S)
+_QUOTED_RE = re.compile(r"^'((?:[^']|'\\'')*)'(?:\s+#.*)?\s*$", re.S)
 
 
 def read_env_file(path) -> dict[str, str]:
@@ -288,7 +293,9 @@ def read_env_file(path) -> dict[str, str]:
             continue
         quoted = _QUOTED_RE.fullmatch(value)
         if quoted is None:
-            value = value.strip()
+            # 与 shell 一致：未加引号时，空白之后的 "#" 开始行内注释；
+            # 紧贴值的 "#"（如 7890#x）属于值本身。
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
         else:
             value = quoted.group(1).replace("'\\''", "'")
         result[key] = value

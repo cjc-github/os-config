@@ -59,13 +59,16 @@ _list_json_profile() {
   fi
 
   if [[ -z "$err" ]]; then
-    errfile="$(mktemp)"
-    if profile_resolve "$name" 2>"$errfile"; then
-      tools=("${SELECTED_TOOLS[@]}")
+    if errfile="$(util_mktemp 'profile 解析错误捕获文件')"; then
+      if profile_resolve "$name" 2>"$errfile"; then
+        tools=("${SELECTED_TOOLS[@]}")
+      else
+        err="$(head -n1 "$errfile")"
+      fi
+      rm -f "$errfile"
     else
-      err="$(head -n1 "$errfile")"
+      err="无法创建临时文件"
     fi
-    rm -f "$errfile"
   fi
 
   printf '{"name":"%s","desc":"%s","extends":"%s","raw_tools":%s,"tokens":%s,"tools":%s,"error":"%s"}' \

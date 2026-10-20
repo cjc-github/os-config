@@ -215,7 +215,9 @@ state_forget <id>                            # remove 后清除
 state_has <id> / state_artifacts <id> / state_list
 ```
 
-每次运行开始 `state_snapshot` 把 `manifest.conf` 存到 `.manifest.run.bak`；成功或 `--keep-going` 时 `state_discard_snapshot` 丢弃，失败回滚时 `state_restore_snapshot` 还原，保证文件改动与清单改动一起回退（否则 status/remove 会依据残留清单去找已回滚的产物）。
+每次写运行开始 `state_snapshot` 把 `manifest.conf` 存到 `.manifest.run.bak`；成功或 `--keep-going` 时 `state_discard_snapshot` 丢弃，失败回滚时 `state_restore_snapshot` 还原，保证文件改动与清单改动一起回退（否则 status/remove 会依据残留清单去找已回滚的产物）。
+
+只有 `install/update/remove` 且非 `--dry-run` 的入口会取快照。`verify`、`status` 与 dry-run 不写清单，也不得丢弃或还原快照——否则它们会删掉并发写运行正在使用的回滚基线。`state.sh` 用 `STATE_SNAPSHOT_OWNER` 标记所有权，只有取过快照的运行才能还原/丢弃它。
 
 `state_action_dir <name>` 返回 `state/actions/<name>/`（模式 700），供动作做**跨运行**的持久记录，与一次性回滚不同。典型用例是 `mirrors`：`state/actions/mirrors/changed.txt` + 原文件备份，使 `remove mirrors` 能在任意后续运行中还原到“本动作首次改写前”的状态。
 

@@ -14,6 +14,8 @@ PORT=8765
 NO_OPEN=0
 SERVER_PID=""
 KEEPALIVE_PID=""
+# 由 cleanup 置位，用来区分“用户主动停止”和“服务自身异常退出”。
+STOPPING=0
 
 usage() {
   cat <<'EOF'
@@ -36,6 +38,7 @@ die_usage() {
 }
 
 cleanup() {
+  STOPPING=1
   trap - INT TERM EXIT
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
@@ -167,5 +170,10 @@ if (( NO_OPEN == 0 )) && [[ -t 0 ]] && command -v xdg-open >/dev/null 2>&1; then
 fi
 printf '按 Ctrl-C 停止。\n'
 
-wait "$SERVER_PID" 2>/dev/null || true
-exit 0
+wait "$SERVER_PID" 2>/dev/null
+rc=$?
+# 用户主动停止时 wait 会被信号打断（130/143），这不算服务故障。
+if (( STOPPING == 1 )) && (( rc >= 128 )); then
+  rc=0
+fi
+exit "$rc"

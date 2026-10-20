@@ -52,17 +52,27 @@ _mirrors_changed_add() {
 _mirrors_durable_backup() {
   local dir="$1" f="$2" base; base=$(basename "$f")
   [[ -f "$dir/$base" ]] && return 0
-  sudo cat -- "$f" >"$dir/$base" || return 1
+  # 重定向会先创建空文件；读取失败时必须删掉，否则下次会误把它当成有效备份。
+  if ! sudo cat -- "$f" >"$dir/$base"; then
+    rm -f -- "$dir/$base"
+    return 1
+  fi
   chmod 600 -- "$dir/$base" 2>/dev/null || true
   log_info "已记录持久备份：$f -> $dir/$base"
 }
 
+# sed 替换串转义：\、& 和分隔符 | 必须按字面输出，否则会被 sed 解释。
+_mirrors_escape_repl() {
+  printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
 action_mirrors_apply() {
-  local id="$1" url origin_re dir f tmp changed=0
+  local id="$1" url origin_re dir f tmp repl changed=0
   _mirrors_defaults
   url="$(_mirrors_url_for_arch)"
   origin_re="$(_mirrors_origin_re)"
-  dir="$(state_action_dir mirrors)"
+  dir="$(state_action_dir mirrors)" || return 1
+  repl="$(_mirrors_escape_repl "$url")"
 
   require_sudo || return 1
   wait_for_apt_lock || return 1
@@ -84,10 +94,11 @@ action_mirrors_apply() {
     for f in "${targets[@]}"; do
       _mirrors_durable_backup "$dir" "$f" || return 1
       register_rollback "$f" sudo
-      tmp=$(mktemp); register_tmpfile "$tmp"
+      tmp=$(mktemp) || { log_error "[$id] 无法创建临时文件"; return 1; }
+      register_tmpfile "$tmp"
       run_step "生成新的 $f" \
-        sudo sed -E -e "s|(URIs:[[:space:]]+)(https?://[^/]+/ubuntu[^ ]*)|\1${url}|g" \
-                    -e "s|(deb(-src)?[[:space:]]+)(https?://[^ ]+ubuntu[^ ]*)|\1${url}|g" \
+        sudo sed -E -e "s|(URIs:[[:space:]]+)(https?://[^/]+/ubuntu[^ ]*)|\1${repl}|g" \
+                    -e "s|(deb(-src)?[[:space:]]+)(https?://[^ ]+ubuntu[^ ]*)|\1${repl}|g" \
                     "$f" >"$tmp" || return 1
       run_step "覆盖 $f" sudo cp -- "$tmp" "$f" || return 1
       _mirrors_changed_add "$dir" "$f"
@@ -122,8 +133,11 @@ action_mirrors_remove() {
       log_warn "[$id] 缺少持久备份，跳过：$f"
     fi
   done <"$list"
+  if (( rc != 0 )); then
+    log_warn "[$id] 还原未完成，保留记录与持久备份以便重试：$dir"
+    return 1
+  fi
   rm -rf -- "$dir"
-  (( rc == 0 )) || return 1
   wait_for_apt_lock || return 1
   run_step "apt update" with_retry 2 10 -- sudo apt-get update || return 1
   log_ok "[$id] 已还原为换源前的 APT 源"

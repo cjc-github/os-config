@@ -167,8 +167,10 @@ logs/                    运行时日志（.gitignore 忽略）
 ## 自测
 
 ```bash
-./tests/run.sh            # 45 个用例，断言 catalog/profile/graph/state/rollback/后端/引擎/动作
+./tests/run.sh            # Bash 回归用例，断言 catalog/profile/graph/state/rollback/后端/引擎/动作/Web UI
 ./tests/run.sh graph      # 只跑名字匹配的用例
+python3 -m unittest discover -s tests -p 'test_*.py' -v   # Web UI 服务端用例
+node --test tests/test_app_js.js                          # 前端用例
 ```
 
 测试全部在临时目录中进行：`HOME`、`STATE_DIR`、`PATH` 都被重定向，`apt-get`/`snap`/`npm`/`sudo`/`fuser`/`ping`/`ip` 均为 fake，不会改动宿主机 `/etc`。

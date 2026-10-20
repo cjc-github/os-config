@@ -39,7 +39,7 @@
   </nav>
 
   <section id="panel-tools" class="mainpanel" role="tabpanel" aria-labelledby="tools-tab">
-    <main class="layout">
+    <div class="layout">
       <section class="panel tools-panel">
         <div class="panel-head">
           <h2>工具清单</h2>
@@ -55,6 +55,13 @@
         <div class="field">
           <label for="search">搜索</label>
           <input id="search" type="search" placeholder="按名称或说明过滤" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="adhoc-input">内联包（apt: / npm: / snap:）</label>
+          <div class="adhoc-row">
+            <input id="adhoc-input" type="text" placeholder="apt:jq 或 npm:@scope/pkg" autocomplete="off">
+            <button id="adhoc-add" type="button" class="ghost">添加</button>
+          </div>
         </div>
         <div id="tool-list" class="tool-list"></div>
         <details id="remove-section" class="remove">
@@ -89,7 +96,7 @@
           </label>
         </div>
       </section>
-    </main>
+    </div>
   </section>
 
   <section id="panel-runs" class="mainpanel" role="tabpanel" aria-labelledby="runs-tab" hidden>

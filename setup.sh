@@ -139,7 +139,15 @@ export VERB
 # ---------------------------------------------------------------------------
 catalog_load || { log_error "catalog 加载失败"; exit 1; }
 
-profile_load >/dev/null 2>&1 || log_warn "profiles 目录不可用（--pick/--all 仍可用）"
+if ! profile_load; then
+  # profile 数据残缺时只有 --list/--pick/--all 能安全继续；
+  # 其余选择方式会用部分解析结果执行，静默漏装工具。
+  if [[ "$LIST" != 1 && -z "$PICK" && "$ALL" != 1 ]]; then
+    log_error "profiles 加载失败，已中止"
+    exit 1
+  fi
+  log_warn "profiles 目录不可用（--pick/--all 仍可用）"
+fi
 
 if [[ "$LIST" == 1 ]]; then
   if [[ "$JSON" == 1 ]]; then
@@ -195,8 +203,13 @@ fi
 # ---------------------------------------------------------------------------
 # 执行
 # ---------------------------------------------------------------------------
-state_init
-state_snapshot          # 记录运行前清单，失败回滚时还原
+# 只读动词与 dry-run 不落状态：dry-run 不写盘；verify/status 只校验。
+# 它们若调用 state_snapshot 后按成功/verify 语义丢弃快照，会删掉并发写运行
+# 正在使用的 .manifest.run.bak，破坏该运行失败时的回滚基线。
+if [[ "$DRY_RUN" != 1 && "$VERB" != verify && "$VERB" != status ]]; then
+  state_init || { log_error "无法初始化状态目录：${STATE_DIR:-}"; exit 1; }
+  state_snapshot || { log_error "无法记录运行前清单快照，已中止"; exit 1; }
+fi
 setup_traps
 
 # EXIT trap：先回滚（保留原退出码），再发 run_end 供 Web UI 汇总

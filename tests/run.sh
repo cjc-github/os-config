@@ -11,6 +11,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+NODE_BIN="$(command -v node || true)"
 PASS=0
 FAIL=0
 FILTER="${1:-}"
@@ -128,17 +129,18 @@ make_fakes() {
 args=()
 leading=1
 while (( $# > 0 )); do
-  case "$1" in
-    -n|-v|-E|--|-H|-S|-k) shift ;;
-    *)
-      if (( leading )) && [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-        export "$1"; shift
-      else
-        leading=0
-        args+=("$1"); shift
-      fi
-      ;;
-  esac
+  if (( leading )); then
+    case "$1" in
+      -n|-v|-E|--|-H|-S|-k) shift; continue ;;
+    esac
+    if [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      export "$1"; shift; continue
+    fi
+    # 与真实 sudo 一致：遇到命令后不再解析 sudo 自己的选项，
+    # 后续参数（如 sed -E）原样传给命令。
+    leading=0
+  fi
+  args+=("$1"); shift
 done
 (( ${#args[@]} == 0 )) && exit 0
 exec "${args[@]}"
@@ -380,6 +382,9 @@ test_catalog_reject() {
   catalog_expect 1 '[foo]' 'type=config'
   catalog_expect 1 '[foo]' 'type=package' 'backend=apt' 'packages=foo' 'deps=nope'
   catalog_expect 0 '[foo]' 'type=config' 'action=git'
+  catalog_expect 1 '[foo]' 'type=config' 'action=../evil'
+  catalog_expect 1 '[foo]' 'type=config' 'action=a/b'
+  catalog_expect 1 '[foo]' 'type=config' 'action=-rf'
   local empty; empty="$(mktemp -d)"
   local out rc
   out=$(catalog_load "$empty" 2>&1); rc=$?
@@ -394,12 +399,29 @@ test_catalog_adhoc() {
   assert_eq apt "${CAT_BACKEND[mytool]}" "adhoc backend"
   assert_eq adhoc "${CAT_GROUP[mytool]}" "adhoc group"
   assert_eq latest "${CAT_TRACK[mytool]}" "adhoc track"
-  catalog_define_adhoc mytool npm other ""
+  catalog_define_adhoc mytool apt mytool "" || not_ok "重复注册相同 adhoc 应成功"
   assert_eq 1 "${#CAT_ORDER[@]}" "adhoc 幂等不重复"
   assert_eq apt "${CAT_BACKEND[mytool]}" "adhoc 幂等不改写"
   local rc
+  catalog_define_adhoc mytool npm other ""; rc=$?
+  assert_rc_eq 1 "$rc" "adhoc 冲突时返回非零"
+  assert_eq apt "${CAT_BACKEND[mytool]}" "adhoc 冲突时不改写 backend"
+  assert_eq mytool "${CAT_PACKAGES[mytool]}" "adhoc 冲突时不改写 packages"
   catalog_define_adhoc 'Bad' apt x ""; rc=$?
   assert_rc_eq 1 "$rc" "非法 adhoc id"
+}
+
+test_catalog_adhoc_rejects_unsafe_spec() {
+  catalog_reset
+  local rc
+  catalog_define_adhoc unsafe apt 'foo --option' ""; rc=$?
+  assert_rc_eq 1 "$rc" "拒绝含空格的包名（避免被拆成多个参数）"
+  catalog_define_adhoc unsafe apt '--option' ""; rc=$?
+  assert_rc_eq 1 "$rc" "拒绝以 - 开头的包名（避免参数注入）"
+  catalog_define_adhoc scope npm '@scope/pkg' ""; rc=$?
+  assert_rc_eq 0 "$rc" "允许 npm 作用域包"
+  catalog_define_adhoc pinned apt 'pkg=1.2.3~rc1' ""; rc=$?
+  assert_rc_eq 0 "$rc" "允许版本约束字符"
 }
 
 # ===========================================================================
@@ -447,6 +469,7 @@ test_profile_errors() {
   resolve_inline 'brew:jq'; rc=$?; assert_rc_eq 1 "$rc" "非法后端报错"
   resolve_inline 'no-such-tool'; rc=$?; assert_rc_eq 1 "$rc" "未知工具报错"
   resolve_inline 'apt:'; rc=$?; assert_rc_eq 1 "$rc" "缺包名报错"
+  resolve_inline 'apt:git'; rc=$?; assert_rc_eq 1 "$rc" "内联 id 与 config 工具冲突时报错"
 
   local d; d="$(mktemp -d)"
   printf '[a]\nextends=b\ntools=git\n[b]\nextends=a\ntools=ssh\n' >"$d/cycle.conf"
@@ -524,6 +547,57 @@ b" "$(state_artifacts foo)" "artifacts 记录"
 
   local d; d="$(state_action_dir ssh)"
   assert_eq 700 "$(stat -c '%a' "$d")" "动作私有目录权限"
+}
+
+test_state_action_dir_mkdir_failure() {
+  local blocker="$TESTDIR/blocker" out rc
+  : >"$blocker"
+  STATE_DIR="$blocker/state"
+  out="$(state_action_dir foo)"; rc=$?
+  assert_ne 0 "$rc" "mkdir 失败时返回非零"
+  assert_eq "" "$out" "失败时不输出目录路径"
+}
+
+test_state_record_write_failure() {
+  local blocker="$TESTDIR/blocker" rc
+  : >"$blocker"
+  STATE_DIR="$blocker/state"
+  state_record foo act; rc=$?
+  assert_ne 0 "$rc" "写入清单失败时返回非零"
+}
+
+test_state_forget_replace_failure() {
+  local rc tmpd="$TESTDIR/mvtmp"
+  state_init
+  state_record foo act /tmp/x
+  mkdir -p "$TESTDIR/fakebin" "$tmpd"
+  cat >"$TESTDIR/fakebin/mv" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "$TESTDIR/fakebin/mv"
+  ( export TMPDIR="$tmpd" PATH="$TESTDIR/fakebin:$PATH"; state_forget foo ); rc=$?
+  assert_ne 0 "$rc" "清单替换失败时返回非零"
+  assert_true "替换失败时保留原记录" state_has foo
+  assert_eq "" "$(ls -A "$tmpd")" "替换失败时清理临时文件"
+}
+
+test_state_forget_grep_failure_keeps_manifest() {
+  local rc tmpd="$TESTDIR/greptmp"
+  state_init
+  state_record foo act /tmp/x
+  state_record bar act /tmp/y
+  local before; before="$(cat "$STATE_FILE")"
+  mkdir -p "$TESTDIR/fakebin" "$tmpd"
+  cat >"$TESTDIR/fakebin/grep" <<'EOF'
+#!/usr/bin/env bash
+exit 2
+EOF
+  chmod +x "$TESTDIR/fakebin/grep"
+  ( export TMPDIR="$tmpd" PATH="$TESTDIR/fakebin:$PATH"; state_forget foo ); rc=$?
+  assert_ne 0 "$rc" "grep 失败时返回非零"
+  assert_eq "$before" "$(cat "$STATE_FILE")" "grep 失败时清单未被清空"
+  assert_eq "" "$(ls -A "$tmpd")" "grep 失败时清理临时文件"
 }
 
 # ===========================================================================
@@ -616,6 +690,29 @@ test_rollback_verify_noop() {
   assert_eq 0 "${_ROLLBACK_PERFORMED:-0}" "verify 不回滚标记"
 }
 
+test_rollback_readonly_keeps_foreign_snapshot() {
+  state_init
+  state_record keep act1 /tmp/keep
+  # 模拟另一个写运行正在使用的快照：本进程从未调用 state_snapshot，不拥有它。
+  printf 'tool|action|/tmp/x|2026-01-01T00:00:00\n' >"$STATE_RUN_BAK"
+  local before; before="$(cat "$STATE_RUN_BAK")"
+
+  rollback_on_exit 0
+  assert_file_exists "$STATE_RUN_BAK" "成功退出不删除他人快照"
+  assert_eq "$before" "$(cat "$STATE_RUN_BAK")" "成功退出不改写他人快照"
+
+  _ROLLBACK_DONE=0
+  VERB=verify rollback_on_exit 1
+  assert_file_exists "$STATE_RUN_BAK" "verify 失败不删除他人快照"
+  assert_eq "$before" "$(cat "$STATE_RUN_BAK")" "verify 失败不改写他人快照"
+
+  _ROLLBACK_DONE=0
+  VERB=install rollback_on_exit 1
+  assert_file_exists "$STATE_RUN_BAK" "失败退出不删除他人快照"
+  assert_eq "$before" "$(cat "$STATE_RUN_BAK")" "失败退出不改写他人快照"
+  assert_true "他人快照未被用于回滚清单" state_has keep
+}
+
 # ===========================================================================
 # 7. util
 # ===========================================================================
@@ -635,6 +732,20 @@ test_util() {
   assert_eq 192.168.114.50 "$(detect_primary_ipv4)" "本机 IPv4 探测"
   assert_true "sudo 可用" sudo_available
   assert_true "require_sudo" require_sudo
+}
+
+test_util_mktemp() {
+  local f rc
+  f="$(util_mktemp '测试临时文件')"; rc=$?
+  assert_rc_eq 0 "$rc" "正常创建临时文件"
+  assert_file_exists "$f" "返回可用路径"
+  rm -f -- "$f"
+  # 环境前缀不会作用于赋值里的命令替换，需显式导出。
+  export TMPDIR="$TESTDIR/no-such-tmpdir"
+  f="$(util_mktemp '测试临时文件')"; rc=$?
+  unset TMPDIR
+  assert_ne 0 "$rc" "mktemp 失败返回非零"
+  assert_eq "" "$f" "失败时不输出路径"
 }
 
 test_with_retry() {
@@ -696,6 +807,24 @@ test_log_redact() {
   assert_not_contains "$log" 'xyz' "原始 token 不落盘"
   assert_not_contains "$log" 'u:p' "原始凭据不落盘"
   assert_eq 600 "$(stat -c '%a' "$LOG_FILE")" "日志权限 600"
+}
+
+# 日志目录不可写时应降级为仅终端输出，而不是让每次日志都向 stderr 抛重定向错误。
+test_log_unwritable_degrades_to_terminal() {
+  local blocker="$TESTDIR/blocker" out rc
+  : >"$blocker"
+  out="$(LOG_FILE="$blocker/nested/run.log" bash -c '
+    . "$1/engine/lib/log.sh"
+    log_info "still-visible"
+    printf "LOG_FILE=[%s]\n" "${LOG_FILE-<unset>}"
+    printf "LOG_PATH=[%s]\n" "$(log_path)"
+  ' _ "$ROOT" 2>&1)"; rc=$?
+  assert_rc_eq 0 "$rc" "日志初始化失败不中止"
+  assert_contains "$out" "still-visible" "日志仍输出到终端"
+  assert_contains "$out" "无法写入日志文件" "给出一次性警告"
+  assert_contains "$out" "LOG_FILE=[]" "禁用落盘日志"
+  assert_contains "$out" "LOG_PATH=[<未落盘>]" "日志路径有可读占位"
+  assert_not_contains "$out" "No such file or directory" "不产生重定向噪声"
 }
 
 # ===========================================================================
@@ -822,6 +951,15 @@ test_npm_backend() {
   assert_file_missing "$FAKE_NPM_PREFIX/bin/foo" "npm 卸载命令"
 }
 
+test_npm_install_mktemp_failure_aborts() {
+  local rc
+  : >"$FAKE_NPM_LOG"
+  TMPDIR="$TESTDIR/no-such-tmpdir" \
+    npm_install_global_fixed somepkg latest "" >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "mktemp 失败时 npm 安装返回非零"
+  assert_not_contains "$(cat "$FAKE_NPM_LOG")" "install" "mktemp 失败时不执行 npm install"
+}
+
 test_snap_backend() {
   catalog_reset
   register_pkg_tool snapfoo snap foo
@@ -849,6 +987,20 @@ test_snap_backend() {
   assert_rc_eq 0 "$rc" "snap remove"
   backend_dispatch verify snapfoo >/dev/null 2>&1; rc=$?
   assert_rc_eq 1 "$rc" "移除后 verify 失败"
+}
+
+test_snap_update_installs_missing_package() {
+  catalog_reset
+  register_pkg_tool snapmulti snap 'foo bar'
+  local rc
+  : >"$FAKE_SNAP_LOG"
+  printf 'foo\n' >"$TESTDIR/snap-installed"
+
+  backend_dispatch update snapmulti >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "snap update 部分已装时成功"
+  assert_contains "$(cat "$FAKE_SNAP_LOG")" "refresh foo" "已装包刷新"
+  assert_contains "$(cat "$FAKE_SNAP_LOG")" "install bar" "缺失包补装"
+  assert_contains "$(cat "$TESTDIR/snap-installed")" "bar" "缺失包标记已装"
 }
 
 # ===========================================================================
@@ -1012,6 +1164,120 @@ test_action_nodejs_defaults() {
   assert_rc_eq 2 "$rc" "nodejs 非法完整版本"
 }
 
+test_action_git_remove_failure_reports_nonzero() {
+  . "$ROOT/engine/actions/git.sh"
+  local fakebin rc
+  fakebin="$TMPROOT/gitfail"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/git" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *--get*) printf 'http://127.0.0.1:7890\n'; exit 0 ;;
+  *--unset*) exit 1 ;;
+esac
+exit 0
+EOF
+  chmod +x "$fakebin/git"
+
+  PATH="$fakebin:$PATH" action_git_remove git >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "unset 失败时 remove 返回非零"
+}
+
+test_action_git_apply_rolls_back_identity() {
+  . "$ROOT/engine/actions/git.sh"
+  local cfg="$HOME/.gitconfig" before rc
+  printf '[user]\n\tname = Old\n' >"$cfg"
+  before="$(cat "$cfg")"
+
+  GIT_USER_NAME='New Name' GIT_USER_EMAIL='new@example.com' PROXY_ENABLED=false \
+    action_git_apply git >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "身份写入成功"
+  assert_contains "$(cat "$cfg")" 'New Name' "身份已写入"
+
+  rollback_on_exit 1
+  assert_eq "$before" "$(cat "$cfg")" "失败回滚还原 ~/.gitconfig"
+}
+
+test_action_git_remove_restores_original_proxy() {
+  . "$ROOT/engine/actions/git.sh"
+  local fakebin rc
+  fakebin="$TMPROOT/gitstore"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/git" <<'EOF'
+#!/usr/bin/env bash
+shift 2   # config --global
+case "${1:-}" in
+  --get)
+    f="$TESTDIR/gitcfg-${2}"
+    [[ -f "$f" ]] && { cat "$f"; exit 0; }
+    exit 1 ;;
+  --unset)
+    rm -f "$TESTDIR/gitcfg-${2}"; exit 0 ;;
+  *)
+    printf '%s\n' "${2}" >"$TESTDIR/gitcfg-${1}"; exit 0 ;;
+esac
+EOF
+  chmod +x "$fakebin/git"
+  printf 'http://corp-proxy:8080\n' >"$TESTDIR/gitcfg-http.proxy"
+
+  PATH="$fakebin:$PATH" PROXY_ENABLED=true PROXY_HOST=127.0.0.1 PROXY_PORT=7890 \
+    action_git_apply git >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "git apply"
+  assert_eq 'http://127.0.0.1:7890' "$(cat "$TESTDIR/gitcfg-http.proxy")" "apply 写入新代理"
+
+  PATH="$fakebin:$PATH" action_git_remove git >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "git remove"
+  assert_eq 'http://corp-proxy:8080' "$(cat "$TESTDIR/gitcfg-http.proxy" 2>/dev/null)" "remove 还原原有代理"
+  assert_file_missing "$TESTDIR/gitcfg-https.proxy" "remove 不重建原本不存在的键"
+}
+
+test_nodejs_npm_config_failure_aborts_apply() {
+  . "$ROOT/engine/actions/nodejs.sh"
+  local fakebin rc
+  mkdir -p "$HOME/.nvm"
+  cat >"$HOME/.nvm/nvm.sh" <<'EOF'
+nvm() {
+  case "${1:-}" in
+    --version) printf '0.40.1\n' ;;
+    version-remote) printf 'v22.0.0\n' ;;
+    *) return 0 ;;
+  esac
+}
+EOF
+
+  fakebin="$TMPROOT/npmfail"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/npm" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '10.0.0\n'; exit 0 ;;
+  config)
+    if [[ "${2:-}" == get ]]; then printf 'true\n'; exit 0; fi
+    exit 1 ;;
+esac
+exit 0
+EOF
+  chmod +x "$fakebin/npm"
+
+  PATH="$fakebin:$PATH" action_nodejs_apply nodejs >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "npm config set 失败时 apply 返回非零"
+}
+
+test_nodejs_mktemp_failure_skips_curl() {
+  . "$ROOT/engine/actions/nodejs.sh"
+  local fakebin rc marker="$TESTDIR/curl-called"
+  rm -rf "$HOME/.nvm"; rm -f "$marker"
+  fakebin="$TESTDIR/curlrec"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\n: >%s\nexit 0\n' "$marker" >"$fakebin/curl"
+  chmod +x "$fakebin/curl"
+
+  TMPDIR="$TESTDIR/no-such-tmpdir" PATH="$fakebin:$PATH" \
+    action_nodejs_apply nodejs >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "mktemp 失败时 apply 返回非零"
+  assert_file_missing "$marker" "mktemp 失败时不调用 curl"
+}
+
 test_action_nosuspend_helpers() {
   . "$ROOT/engine/actions/nosuspend.sh"
   local rc
@@ -1036,6 +1302,231 @@ test_action_ssh() {
   action_ssh_remove ssh >/dev/null 2>&1; rc=$?
   assert_rc_eq 0 "$rc" "ssh remove"
   assert_file_missing "$HOME/.ssh/id_ed25519" "remove 删除自建密钥"
+}
+
+test_action_ssh_remove_failure_keeps_record() {
+  . "$ROOT/engine/actions/ssh.sh"
+  action_ssh_apply ssh >/dev/null 2>&1
+  local rc dir list fakebin real_rm
+  dir="$STATE_DIR/actions/ssh"
+  list="$dir/created.txt"
+  assert_file_exists "$list" "apply 写入 created.txt"
+
+  # 只让删除私钥失败，其余 rm 调用走真实命令
+  fakebin="$TMPROOT/rmfail"
+  mkdir -p "$fakebin"
+  real_rm="$(command -v rm)"
+  cat >"$fakebin/rm" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [[ "\$a" == "$HOME/.ssh/id_ed25519" ]] && exit 1
+done
+exec "$real_rm" "\$@"
+EOF
+  chmod +x "$fakebin/rm"
+
+  PATH="$fakebin:$PATH" action_ssh_remove ssh >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "删除失败时 remove 返回非零"
+  assert_file_exists "$list" "删除失败时保留记录以便重试"
+  assert_file_exists "$HOME/.ssh/id_ed25519" "删除失败后私钥仍在"
+}
+
+test_action_ssh_apply_untracked_key_fails() {
+  . "$ROOT/engine/actions/ssh.sh"
+  local blocker="$TESTDIR/blocker" rc
+  # 让 state_action_dir 失败：STATE_DIR 位于普通文件之下，mkdir -p 必然报错
+  : >"$blocker"
+  STATE_DIR="$blocker/state" action_ssh_apply ssh >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "记录失败时 apply 返回非零"
+  assert_file_missing "$HOME/.ssh/id_ed25519" "记录失败后不留下未跟踪密钥"
+}
+
+test_action_mirrors_apply_escapes_replacement() {
+  . "$ROOT/engine/actions/mirrors.sh"
+  local src="$TESTDIR/ubuntu.sources" url rc
+  url='https://mirror.example/ubuntu?a=1&b=2|c'
+  printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\n' >"$src"
+  _mirrors_sources() { printf '%s\n' "$src"; }
+
+  MIRROR_APT_URL="$url" MIRROR_APT_PORTS_URL="$url" \
+    action_mirrors_apply mirrors >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "apply 成功"
+  assert_contains "$(cat "$src")" "URIs: $url" "URL 中的 & 和 | 按字面写入"
+}
+
+test_action_mirrors_remove_failure_keeps_backup() {
+  . "$ROOT/engine/actions/mirrors.sh"
+  local dir target base fakebin real_cp rc
+  dir="$(state_action_dir mirrors)"
+  target="$TESTDIR/sources.list"
+  base="$(basename "$target")"
+  printf 'original\n' >"$dir/$base"
+  printf '%s\n' "$target" >"$dir/changed.txt"
+
+  # 只让还原目标失败，其余 cp 调用走真实命令
+  fakebin="$TMPROOT/cpfail"
+  mkdir -p "$fakebin"
+  real_cp="$(command -v cp)"
+  cat >"$fakebin/cp" <<EOF
+#!/usr/bin/env bash
+dest="\${!#}"
+[[ "\$dest" == "$target" ]] && exit 1
+exec "$real_cp" "\$@"
+EOF
+  chmod +x "$fakebin/cp"
+
+  PATH="$fakebin:$PATH" action_mirrors_remove mirrors >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "还原失败时 remove 返回非零"
+  assert_file_exists "$dir/changed.txt" "还原失败时保留变更记录"
+  assert_file_exists "$dir/$base" "还原失败时保留持久备份"
+}
+
+test_mirrors_durable_backup_failure_leaves_no_partial() {
+  . "$ROOT/engine/actions/mirrors.sh"
+  local dir target fakebin real_cat rc
+  dir="$(state_action_dir mirrors)"
+  target="$TESTDIR/sources.list"
+  printf 'original\n' >"$target"
+
+  # 只让备份读取失败，其余 cat 调用走真实命令
+  fakebin="$TMPROOT/catfail"
+  mkdir -p "$fakebin"
+  real_cat="$(command -v cat)"
+  cat >"$fakebin/cat" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [[ "\$a" == "$target" ]] && exit 1
+done
+exec "$real_cat" "\$@"
+EOF
+  chmod +x "$fakebin/cat"
+
+  PATH="$fakebin:$PATH" _mirrors_durable_backup "$dir" "$target" >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "备份失败时返回非零"
+  assert_file_missing "$dir/sources.list" "备份失败不留空备份"
+}
+
+test_action_syslog_remove_own_link_only() {
+  . "$ROOT/engine/actions/syslog.sh"
+  local link="$HOME/.local/bin/bat" rc
+  # 避免触碰宿主 /etc
+  _SYSLOG_DROPIN="$TESTDIR/journald.conf"
+  mkdir -p "$(dirname "$link")"
+
+  ln -s /opt/custom/bat "$link"
+  action_syslog_remove syslog >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "remove 跳过非本动作软链"
+  assert_true "非本动作创建的 bat 软链保留" test -L "$link"
+
+  ln -sfn "$TESTDIR/bin/batcat" "$link"
+  action_syslog_remove syslog >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "remove 清理本动作软链"
+  assert_file_missing "$link" "指向 batcat 的软链被移除"
+}
+
+test_action_syslog_remove_missing_end_marker_refuses() {
+  . "$ROOT/engine/actions/syslog.sh"
+  local bashrc="$HOME/.bashrc" before rc
+  # 避免触碰宿主 /etc
+  _SYSLOG_DROPIN="$TESTDIR/journald.conf"
+  {
+    printf 'user line before\n'
+    printf '%s\n' "$_SYSLOG_ALIAS_BEGIN"
+    printf "alias oslogs='journalctl -e'\n"
+    printf 'user line after\n'
+  } >"$bashrc"
+  before="$(cat "$bashrc")"
+
+  action_syslog_remove syslog >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "缺少结束标记时拒绝删除"
+  assert_eq "$before" "$(cat "$bashrc")" ".bashrc 未被改动"
+}
+
+test_action_syslog_mktemp_failure_aborts_before_write() {
+  . "$ROOT/engine/actions/syslog.sh"
+  local rc guard="$TESTDIR/install-called"
+  # 避免触碰宿主 /etc
+  _SYSLOG_DROPIN="$TESTDIR/journald.conf"
+  mkdir -p "$TESTDIR/bin"
+  printf '#!/usr/bin/env bash\ntouch %q\nexit 0\n' "$guard" >"$TESTDIR/bin/install"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$TESTDIR/bin/logrotate"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$TESTDIR/bin/systemctl"
+  chmod +x "$TESTDIR/bin/install" "$TESTDIR/bin/logrotate" "$TESTDIR/bin/systemctl"
+  rm -f -- "$guard" "$_SYSLOG_DROPIN"
+
+  TMPDIR="$TESTDIR/no-such-tmpdir" PATH="$TESTDIR/bin:$PATH" \
+    action_syslog_apply syslog >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "mktemp 失败时 apply 返回非零"
+  assert_file_missing "$guard" "mktemp 失败时不执行 install"
+  assert_file_missing "$_SYSLOG_DROPIN" "mktemp 失败时不写 drop-in"
+}
+
+test_action_syslog_apply_write_failure_reports_nonzero() {
+  . "$ROOT/engine/actions/syslog.sh"
+  local bashrc="$HOME/.bashrc" rc
+  # 避免触碰宿主 /etc
+  _SYSLOG_DROPIN="$TESTDIR/journald.conf"
+  mkdir -p "$TESTDIR/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$TESTDIR/bin/logrotate"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$TESTDIR/bin/systemctl"
+  chmod +x "$TESTDIR/bin/logrotate" "$TESTDIR/bin/systemctl"
+  # 用目录占位，确保任何写入/复制都会失败（root 下也不受权限位影响）
+  mkdir -p "$bashrc"
+
+  PATH="$TESTDIR/bin:$PATH" action_syslog_apply syslog >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "无法写入 .bashrc 时 apply 返回非零"
+}
+
+test_action_proxy_remove_sed_failure_reports_nonzero() {
+  . "$ROOT/engine/actions/proxy.sh"
+  local bashrc="$HOME/.bashrc" fakebin real_sed rc
+  PROXY_ENABLED=true PROXY_HOST=127.0.0.1 PROXY_PORT=7890 \
+    action_proxy_apply proxy >/dev/null 2>&1
+  assert_true "apply 写入 proxy 块" grep -qF "$_PROXY_BEGIN" "$bashrc"
+
+  # 只让删除托管块的 sed 调用失败，其余 sed（日志脱敏等）走真实命令
+  fakebin="$TMPROOT/sedfail"
+  mkdir -p "$fakebin"
+  real_sed="$(command -v sed)"
+  cat >"$fakebin/sed" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [[ "\$a" == *"proxy begin"* ]] && exit 1
+done
+exec "$real_sed" "\$@"
+EOF
+  chmod +x "$fakebin/sed"
+
+  PATH="$fakebin:$PATH" action_proxy_remove proxy >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "sed 失败时 remove 返回非零"
+  assert_true "删除失败时 proxy 块保留" grep -qF "$_PROXY_BEGIN" "$bashrc"
+}
+
+test_action_proxy_remove_missing_end_marker_refuses() {
+  . "$ROOT/engine/actions/proxy.sh"
+  local bashrc="$HOME/.bashrc" before rc
+  {
+    printf 'user line before\n'
+    printf '%s\n' "$_PROXY_BEGIN"
+    printf 'export HTTP_PROXY=http://127.0.0.1:7890\n'
+    printf 'user line after\n'
+  } >"$bashrc"
+  before="$(cat "$bashrc")"
+
+  action_proxy_remove proxy >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "缺少结束标记时拒绝删除"
+  assert_eq "$before" "$(cat "$bashrc")" ".bashrc 未被改动"
+}
+
+test_action_proxy_apply_write_failure_reports_nonzero() {
+  . "$ROOT/engine/actions/proxy.sh"
+  local bashrc="$HOME/.bashrc" rc
+  # 用目录占位，确保任何写入/复制都会失败（root 下也不受权限位影响）
+  mkdir -p "$bashrc"
+
+  PROXY_ENABLED=true PROXY_HOST=127.0.0.1 PROXY_PORT=7890 \
+    action_proxy_apply proxy >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "无法写入 .bashrc 时 apply 返回非零"
 }
 
 test_action_proxy() {
@@ -1104,15 +1595,31 @@ test_entry() {
   bash "$ROOT/setup.sh" --profile no-such-profile --dry-run >/dev/null 2>&1; rc=$?
   assert_rc_eq 2 "$rc" "未知 profile 返回 2"
 
+  rm -rf "$STATE_DIR"
   out=$(bash "$ROOT/setup.sh" --dry-run --pick git 2>&1); rc=$?
   assert_rc_eq 0 "$rc" "dry-run 返回 0"
   assert_contains "$out" "dry-run" "dry-run 提示"
+  assert_file_missing "$STATE_DIR/manifest.conf" "dry-run 不写状态清单"
 
   out=$(bash "$ROOT/setup.sh" --all --dry-run 2>&1); rc=$?
   assert_rc_eq 0 "$rc" "--all dry-run 返回 0"
 
   out=$(bash "$ROOT/setup.sh" status --pick git-cli 2>&1); rc=$?
   assert_rc_eq 0 "$rc" "status 返回 0"
+}
+
+test_setup_rejects_broken_profiles() {
+  local bad="$TESTDIR/profiles-bad" rc
+  mkdir -p "$bad"
+  # 残缺文件：两个 profile 都已登记 tools，之后才遇到非法字段。
+  # 若吞掉加载错误，profile 会带着部分数据继续执行。
+  printf '[default]\ntools=git\n[p]\ntools=git\nbogus=1\n' >"$bad/broken.conf"
+  PROFILES_DIR="$bad" bash "$ROOT/setup.sh" --profile p --dry-run >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "profile 解析失败时不执行残缺 profile"
+  PROFILES_DIR="$bad" bash "$ROOT/setup.sh" --dry-run >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "无法加载 profiles 时默认选择失败"
+  PROFILES_DIR="$bad" bash "$ROOT/setup.sh" --pick git --dry-run >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "--pick 不依赖 profiles"
 }
 
 test_events_json() {
@@ -1209,6 +1716,23 @@ PY
   assert_rc_eq 2 "$rc" "--json 必须配合 --list"
 }
 
+test_list_json_profile_mktemp_failure_reports_error() {
+  local out parsed
+  out="$(TMPDIR="$TESTDIR/no-such-tmpdir" bash "$ROOT/setup.sh" --list --json 2>/dev/null)"
+  parsed=$(python3 - "$out" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1])
+profs={p["name"]:p for p in d["profiles"]}
+assert profs, "no profiles"
+for p in profs.values():
+    assert p["error"]=="无法创建临时文件", (p["name"], p["error"])
+    assert p["tools"]==[], (p["name"], p["tools"])
+print("ok")
+PY
+)
+  assert_eq ok "$parsed" "mktemp 失败时 profile 报错且不返回部分结果"
+}
+
 test_ui_launcher() {
   local out rc
   out=$(bash "$ROOT/ui.sh" --help 2>&1); rc=$?
@@ -1238,6 +1762,35 @@ PY
   wait "$holder" 2>/dev/null
   assert_rc_eq 1 "$rc" "端口占用返回 1"
   assert_contains "$out" "已被占用" "端口占用提示"
+
+  # 服务自身异常退出时，ui.sh 必须如实返回其退出码，而不是吞成 0。
+  local crashbin real_py
+  real_py="$(command -v python3)"
+  crashbin="$TESTDIR/crashbin"
+  mkdir -p "$crashbin"
+  port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+  cat >"$TESTDIR/crash_server.py" <<'PY'
+import socket, sys, time
+args = sys.argv[1:]
+port = int(args[args.index("--port") + 1])
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port))
+s.listen(1)
+time.sleep(0.5)
+sys.exit(3)
+PY
+  cat >"$crashbin/python3" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-m" && "\${2:-}" == "ui.server" ]]; then
+  exec "$real_py" "$TESTDIR/crash_server.py" "\${@:3}"
+fi
+exec "$real_py" "\$@"
+EOF
+  chmod +x "$crashbin/python3"
+  out=$(PATH="$crashbin:$PATH" timeout 20 bash "$ROOT/ui.sh" --no-open --port "$port" </dev/null 2>&1); rc=$?
+  assert_rc_eq 3 "$rc" "服务崩溃时返回真实退出码"
+  assert_contains "$out" "已启动" "崩溃前已打印访问地址"
 }
 
 test_ui_ignores_and_docs() {
@@ -1314,6 +1867,25 @@ test_setup_run_end() {
   assert_contains "$(cat "$ev")" '"rolled_back":false' "run_end 回滚字段"
 }
 
+test_ui_python_suite() {
+  local out rc
+  out=$(cd "$ROOT" && python3 -m unittest tests/test_ui_server.py 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "Python UI 测试通过"
+  assert_contains "$out" "OK" "Python UI 测试输出 OK"
+}
+
+test_ui_node_suite() {
+  local out rc
+  if [[ -z "${NODE_BIN:-}" ]]; then
+    printf 'node 不可用，跳过前端测试\n'
+    ok
+    return 0
+  fi
+  out=$(cd "$ROOT" && "$NODE_BIN" --test tests/test_app_js.js 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "Node 前端测试通过"
+  assert_contains "$out" "# fail 0" "Node 前端测试无失败"
+}
+
 # ===========================================================================
 run_test '所有 Shell 脚本语法'                         test_syntax
 run_test '事件 JSON 转义'                              test_events_json
@@ -1322,6 +1894,7 @@ run_test 'ui.env 覆盖顺序'                             test_ui_env_precedenc
 run_test 'ASSUME_YES 非交互确认'                       test_confirm_assume_yes
 run_test 'ASSUME_YES 卸载'                             test_remove_assume_yes
 run_test '--list --json 结构'                          test_list_json
+run_test '--list --json mktemp 失败仍结构化'            test_list_json_profile_mktemp_failure_reports_error
 run_test 'engine 事件顺序与字段'                        test_engine_events
 run_test 'engine dry-run planned 事件'                  test_engine_events_dryrun_planned
 run_test 'engine rollback 事件'                         test_engine_events_rollback
@@ -1331,12 +1904,17 @@ run_test 'catalog 变量展开'                            test_catalog_expand_v
 run_test 'catalog artifacts 展开'                      test_catalog_artifacts
 run_test 'catalog 非法输入拒绝'                        test_catalog_reject
 run_test 'catalog adhoc 注册与幂等'                    test_catalog_adhoc
+run_test 'catalog adhoc 拒绝不安全包名'                test_catalog_adhoc_rejects_unsafe_spec
 run_test 'profile 加载、顺序与 tokens'                 test_profile_basic
 run_test 'profile 解析数量（minimal/ai/default/dev）'  test_profile_resolve_counts
 run_test 'profile 内联 backend:spec 与 @分组'          test_profile_inline
 run_test 'profile 错误路径'                            test_profile_errors
 run_test '依赖闭包拓扑与逆序'                          test_graph
 run_test 'state 清单读写与权限'                        test_state
+run_test 'state 目录创建失败时返回非零'                test_state_action_dir_mkdir_failure
+run_test 'state 清单写入失败时返回非零'                test_state_record_write_failure
+run_test 'state 清单替换失败时返回非零'                test_state_forget_replace_failure
+run_test 'state grep 失败时不清空清单'                 test_state_forget_grep_failure_keeps_manifest
 run_test 'rollback 恢复原文件'                         test_rollback_restore
 run_test 'rollback 删除新建文件'                       test_rollback_delete_new
 run_test 'rollback 同文件去重'                         test_rollback_dedup
@@ -1346,14 +1924,19 @@ run_test 'rollback 清理临时文件'                       test_rollback_tmpfi
 run_test 'rollback 同步 state 清单'                    test_rollback_state_snapshot
 run_test 'rollback keep-going 保留清单'                test_rollback_keepgoing_keeps_state
 run_test 'rollback verify 失败不动作'                  test_rollback_verify_noop
+run_test 'rollback 只读运行不碰他人快照'               test_rollback_readonly_keeps_foreign_snapshot
 run_test 'util 基础与 IPv4/sudo'                       test_util
+run_test '临时文件创建失败被检出'                        test_util_mktemp
 run_test 'with_retry 成功/耗尽/用法'                   test_with_retry
 run_test '代理端点推导与校验'                          test_resolve_proxy_endpoint
 run_test '日志脱敏与权限'                              test_log_redact
+run_test '日志不可写时降级为终端'                      test_log_unwritable_degrades_to_terminal
 run_test 'semver/命令校验/后端分派错误'                test_semver_commands_dispatch
 run_test 'apt 后端五动词与 pin'                        test_apt_backend
 run_test 'npm 后端五动词与版本'                        test_npm_backend
+run_test 'npm 安装 mktemp 失败不执行'                   test_npm_install_mktemp_failure_aborts
 run_test 'snap 后端五动词'                             test_snap_backend
+run_test 'snap update 补装缺失包'                      test_snap_update_installs_missing_package
 run_test 'engine config install'                       test_engine_config_apply
 run_test 'engine config remove'                        test_engine_config_remove
 run_test 'engine dry-run 不写盘'                       test_engine_dry_run
@@ -1367,12 +1950,32 @@ run_test 'engine 未知动词'                             test_engine_unknown_v
 run_test '动作脚本接口完整性'                          test_action_interface
 run_test 'mirrors 辅助函数'                            test_action_mirrors_helpers
 run_test 'nodejs 默认参数校验'                         test_action_nodejs_defaults
+run_test 'git remove 失败时返回非零'                   test_action_git_remove_failure_reports_nonzero
+run_test 'git apply 身份可回滚'                        test_action_git_apply_rolls_back_identity
+run_test 'git remove 还原原有代理'                     test_action_git_remove_restores_original_proxy
+run_test 'nodejs npm 配置失败时 apply 失败'            test_nodejs_npm_config_failure_aborts_apply
+run_test 'nodejs mktemp 失败时不下载脚本'               test_nodejs_mktemp_failure_skips_curl
 run_test 'nosuspend 会话判断'                          test_action_nosuspend_helpers
 run_test 'ssh 密钥生成/校验/移除'                      test_action_ssh
+run_test 'ssh remove 失败时保留记录'                   test_action_ssh_remove_failure_keeps_record
+run_test 'ssh 记录失败时不留下未跟踪密钥'               test_action_ssh_apply_untracked_key_fails
+run_test 'mirrors remove 失败时保留备份'               test_action_mirrors_remove_failure_keeps_backup
+run_test 'mirrors apply 转义替换串'                    test_action_mirrors_apply_escapes_replacement
+run_test 'mirrors 备份失败不留空备份'                  test_mirrors_durable_backup_failure_leaves_no_partial
+run_test 'syslog remove 只删自己的软链'                test_action_syslog_remove_own_link_only
+run_test 'syslog remove 缺结束标记时拒绝删除'          test_action_syslog_remove_missing_end_marker_refuses
+run_test 'syslog apply 写入失败时返回非零'             test_action_syslog_apply_write_failure_reports_nonzero
+run_test 'syslog mktemp 失败时不写 drop-in'            test_action_syslog_mktemp_failure_aborts_before_write
 run_test 'proxy 写入/幂等/重写/移除'                   test_action_proxy
+run_test 'proxy remove 删除失败时返回非零'             test_action_proxy_remove_sed_failure_reports_nonzero
+run_test 'proxy remove 缺结束标记时拒绝删除'           test_action_proxy_remove_missing_end_marker_refuses
+run_test 'proxy apply 写入失败时返回非零'              test_action_proxy_apply_write_failure_reports_nonzero
 run_test 'setup.sh 入口参数与 dry-run'                 test_entry
+run_test 'setup 拒绝残缺 profiles'                     test_setup_rejects_broken_profiles
 run_test 'ui.sh 启动器参数'                            test_ui_launcher
 run_test 'Web UI 忽略规则与文档'                       test_ui_ignores_and_docs
+run_test 'Web UI Python 单元测试'                      test_ui_python_suite
+run_test 'Web UI Node 前端测试'                        test_ui_node_suite
 
 printf '\n总计：PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

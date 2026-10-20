@@ -1,4 +1,4 @@
-import json, tempfile, threading, time, unittest, urllib.error, urllib.request
+import json, socket, tempfile, threading, time, unittest, urllib.error, urllib.request
 from pathlib import Path
 from unittest import mock
 from ui import schema
@@ -28,6 +28,13 @@ class AdhocTests(unittest.TestCase):
             with self.assertRaises(schema.ValidationError):
                 schema.validate_pick([bad], {"git"})
 
+    def test_normalized_id_must_not_collide_with_catalog(self):
+        with self.assertRaises(schema.ValidationError):
+            schema.validate_pick(["apt:git"], {"git", "jq"})
+        with self.assertRaises(schema.ValidationError):
+            schema.validate_pick(["npm:@scope/git"], {"scope-git"})
+        self.assertEqual(schema.validate_pick(["apt:jq"], {"git"}), ["apt:jq"])
+
 class ParamTests(unittest.TestCase):
     def test_groups(self):
         groups = {g["id"]: g for g in schema.PARAM_GROUPS}
@@ -46,6 +53,14 @@ class ParamTests(unittest.TestCase):
         with self.assertRaises(schema.ValidationError):
             schema.validate_params({}, ["EVIL"])
 
+    def test_proxy_host_rejects_leading_dash(self):
+        """PROXY_HOST 会被传进 shell/curl，必须与引擎一样拒绝选项注入。"""
+        for bad in ["-x", "-", "--flag"]:
+            with self.assertRaises(schema.ValidationError):
+                schema.validate_params({"PROXY_HOST": bad}, [])
+        for good in ["127.0.0.1", "localhost", "[::1]", "host-name.example"]:
+            schema.validate_params({"PROXY_HOST": good}, [])
+
     def test_three_state_and_escaping(self):
         merged = schema.apply_param_changes(
             {"GIT_USER_NAME": "old", "PROXY_PORT": "7890"},
@@ -57,6 +72,20 @@ class ParamTests(unittest.TestCase):
         env = schema.render_ui_env(merged)
         self.assertIn("GIT_USER_NAME='O'\\''Brien'", env)
         self.assertIn("GIT_USER_EMAIL=", env)
+
+    def test_read_env_inline_comment(self):
+        """user.env 由 shell source；未加引号时的行内注释不属于值。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "user.env"
+            p.write_text("GIT_USER_NAME=Alice # note\n"
+                         "GIT_USER_EMAIL='a#b@x' # note\n"
+                         "PROXY_PORT=7890#x\n"
+                         "# GIT_USER_EMAIL=ignored\n")
+            self.assertEqual(schema.read_env_file(p), {
+                "GIT_USER_NAME": "Alice",
+                "GIT_USER_EMAIL": "a#b@x",
+                "PROXY_PORT": "7890#x",
+            })
 
     def test_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
@@ -236,10 +265,26 @@ class AuthTests(ServerFixture):
         self.assertEqual(d["selection"]["adhoc"], ["apt:jq"])
         self.assertEqual(d["params"]["GIT_USER_NAME"], "A")
         self.assertEqual(d["params"]["GIT_USER_EMAIL"], "u@x")
+        self.assertEqual(d["defaults"]["GIT_USER_NAME"], "U")
+        self.assertEqual(d["defaults"]["GIT_USER_EMAIL"], "u@x")
         self.assertNotIn("SSH_KEY_PASSPHRASE", d["params"])
+        self.assertNotIn("SSH_KEY_PASSPHRASE", d["defaults"])
         self.assertTrue(d["secrets"]["SSH_KEY_PASSPHRASE"])
-        for key in ["profiles", "running", "current", "sudo"]:
+        for key in ["profiles", "running", "current", "sudo", "defaults"]:
             self.assertIn(key, d)
+
+    def test_state_drops_stale_selection(self):
+        """catalog 变更或文件被手工改坏后，陈旧条目不应再导致 run 校验失败。"""
+        ui = self.cfg.state_dir / "ui"
+        ui.mkdir(parents=True, exist_ok=True)
+        (ui / "selection.json").write_text(json.dumps(
+            {"version": 1, "tools": ["git", "ghost"],
+             "adhoc": ["apt:jq", "bad token"], "verb": "install"}))
+        code, _, body = self.get("/api/state", token="tok")
+        self.assertEqual(code, 200, body)
+        d = json.loads(body)
+        self.assertEqual(d["selection"]["tools"], ["git"])
+        self.assertEqual(d["selection"]["adhoc"], ["apt:jq"])
 
     def test_static_and_traversal(self):
         self.assertEqual(self.get("/", token="tok")[0], 200)
@@ -254,6 +299,65 @@ class AuthTests(ServerFixture):
     def test_post_requires_json(self):
         code, _ = self.post("/api/sudo/check", {}, content_type="text/plain")
         self.assertEqual(code, 415)
+
+    def test_rejects_oversized_body(self):
+        """超大 Content-Length 不应被完整读入内存。"""
+        port = self.srv.server_address[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(
+                b"POST /api/sudo/check HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer tok\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 2097152\r\n\r\n")
+            status_line = sock.recv(4096).split(b"\r\n", 1)[0]
+        self.assertIn(b"413", status_line)
+
+class SelectionFallbackTests(unittest.TestCase):
+    def test_profile_fallback_excludes_adhoc_ids(self):
+        """default profile 里的内联工具会以派生 id 出现，不能当作 catalog 工具回填。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            holder = mock.Mock()
+            holder.server.config.state_dir = Path(tmp) / "state"
+            catalog = {
+                "catalog": [{"id": "git"}],
+                "profiles": [{"name": "default",
+                              "tools": ["git", "apt-htop"]}],
+            }
+            selection = server_mod.Handler._read_selection(holder, catalog)
+        self.assertEqual(selection["tools"], ["git"])
+        self.assertEqual(selection["adhoc"], [])
+
+class PlanTimeoutTests(ServerFixture):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        catalog = {"catalog": [{"id": "git", "desc": "git",
+                                "type": "config", "deps": ""}],
+                   "profiles": [{"name": "default", "tools": ["git"],
+                                 "error": ""}]}
+        slow = cls.cfg.project_dir / "slow-setup.sh"
+        slow.write_text("#!/usr/bin/env bash\n"
+                        "if [[ \" $* \" == *\" --list \"* ]]; then\n"
+                        f"  printf '%s\\n' '{json.dumps(catalog)}'\n"
+                        "  exit 0\n"
+                        "fi\n"
+                        "sleep 5\n")
+        cls.cfg.setup_cmd = ["bash", str(slow)]
+
+    def test_plan_timeout_is_bounded_and_reported(self):
+        """计划子进程卡住时必须有上限，且不能把 handler 永久占住。"""
+        with mock.patch.object(server_mod, "_PLAN_TIMEOUT", 0.5, create=True):
+            started = time.time()
+            code, body = self.post("/api/plan",
+                                   {"verb": "install", "pick": ["git"]})
+            elapsed = time.time() - started
+        self.assertEqual(code, 200, body)
+        d = json.loads(body)
+        self.assertEqual(d["exit"], 1)
+        self.assertLess(elapsed, 3)
+        self.assertTrue(any("超时" in line for line in d["logs"]), d["logs"])
+
 
 FAKE = r'''#!/usr/bin/env bash
 printf '%s\n' "$@" > "$0.args"
@@ -357,6 +461,21 @@ class RunTests(ServerFixture):
                              for e in d["events"]))
         self.assertIsNone(d["meta"]["verify_rc"])
 
+    def test_remove_keeps_install_selection(self):
+        ui = self.cfg.state_dir / "ui"
+        ui.mkdir(parents=True, exist_ok=True)
+        original = {"version": 1, "tools": ["git"], "adhoc": ["apt:jq"],
+                    "verb": "install", "updated": "2026-10-20T10:00:00Z"}
+        (ui / "selection.json").write_text(json.dumps(original))
+        code, body = self.post("/api/run", {"verb": "remove", "pick": ["git"],
+                                            "confirm": True})
+        self.assertEqual(code, 202, body)
+        self.wait_idle()
+        saved = json.loads((ui / "selection.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["tools"], ["git"])
+        self.assertEqual(saved["adhoc"], ["apt:jq"])
+        self.assertEqual(saved["verb"], "install")
+
     def test_history_rejects_bad_name(self):
         for bad in ["a%2Fb", "x.txt", "20261020-120000"]:
             code, _, _ = self.get(f"/api/history/{bad}", token="tok")
@@ -420,6 +539,35 @@ class SseTests(ServerFixture):
         code, _, _ = self.get("/api/events?run_id=../x", token="tok", timeout=2)
         self.assertEqual(code, 400)
 
+    def test_head_does_not_open_stream(self):
+        """HEAD 不应进入 SSE 长连接，否则连接会一直挂到心跳超时。"""
+        req = urllib.request.Request(
+            self.base + "/api/events", method="HEAD",
+            headers={"Authorization": "Bearer tok"})
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                code = resp.status
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+        self.assertEqual(code, 405)
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_finished_run_without_backlog_streams_done(self):
+        """服务重启后事件缓冲为空，回看已完成的 run 也必须收到 done 并断开。"""
+        rid = "20261020-140000-cccccc"
+        run_dir = self.cfg.state_dir / "ui" / "runs" / rid
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "meta.json").write_text(json.dumps(
+            {"run_id": rid, "verb": "install", "started": "2026-10-20T14:00:00Z",
+             "finished": "2026-10-20T14:01:00Z", "rc": 0, "ok": 1,
+             "skipped": 0, "failed": 0, "rolled_back": False, "verify_rc": 0}),
+            encoding="utf-8")
+        events = self.sse("?run_id=" + rid, timeout=2)
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(events[-1]["data"]["run_id"], rid)
+
     def test_log_events_carry_item_id(self):
         run_id = self.start_run()
         events = self.sse("?run_id=" + run_id)
@@ -461,6 +609,14 @@ class InstalledTests(ServerFixture):
         self.assertEqual(d["items"][0]["status"], "ok")
         self.assertEqual(d["exit"], 0)
         self.assertTrue(d["logs"])
+
+    def test_status_conflicts_with_running_job(self):
+        self.srv.run_lock.acquire()
+        try:
+            code, _, _ = self.get("/api/status?pick=git", token="tok")
+        finally:
+            self.srv.run_lock.release()
+        self.assertEqual(code, 409)
 
     def test_status_pick_is_single_comma_argument(self):
         code, _, body = self.get("/api/status?pick=git,apt:jq", token="tok")
@@ -596,3 +752,116 @@ class FrontendTests(unittest.TestCase):
         body_rule = css.split(".log-group-body {", 1)[1].split("}", 1)[0]
         self.assertNotIn("max-height", body_rule)
         self.assertNotIn("overflow-y", body_rule)
+
+    def test_adhoc_input_and_semantic_layout(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        for elem_id in ["adhoc-input", "adhoc-add"]:
+            self.assertIn(f'id="{elem_id}"', html)
+        self.assertIn('class="layout"', html)
+        self.assertNotIn("<main", html)
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["validAdhocToken", "adhoc-input", "adhoc-add"]:
+            self.assertIn(token, js)
+
+    def test_history_playback_locked_during_run(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["function canLoadHistory", "updateHistoryAvailability",
+                      "canLoadHistory(isBusy())"]:
+            self.assertIn(token, js)
+
+    def test_log_export_preserves_stream_order(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["logLines: []", "appendLogLine(S.logLines",
+                      "S.logLines = []"]:
+            self.assertIn(token, js)
+        collect = js.split("function collectLogLines()", 1)[1].split("}", 1)[0]
+        self.assertIn("S.logLines", collect)
+        self.assertNotIn("querySelectorAll", collect)
+
+    def test_selection_locked_during_run(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["function updateSelectionControls", "updateSelectionControls()",
+                      "function isBusy()", "box.disabled = isBusy()"]:
+            self.assertIn(token, js)
+        controls = js.split("function updateSelectionControls()", 1)[1].split("}", 1)[0]
+        self.assertIn("const busy = isBusy();", controls)
+        checking = js.split("function setChecking(", 1)[1].split("\nfunction ", 1)[0]
+        self.assertIn("updateSelectionControls();", checking)
+
+    def test_history_and_plan_blocked_while_checking(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        availability = js.split("function updateHistoryAvailability(", 1)[1].split("}", 1)[0]
+        self.assertIn("canLoadHistory(isBusy())", availability)
+        history = js.split("async function loadHistory(", 1)[1].split("try {", 1)[0]
+        self.assertIn("if (!canLoadHistory(isBusy()))", history)
+        plan = js.split("async function runPlan()", 1)[1].split("const seq", 1)[0]
+        self.assertIn("if (isBusy()) return;", plan)
+
+    def test_adhoc_removal_rerenders_tool_list(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        block = js.split("box.value = token;", 1)[1].split(
+            "section.appendChild(line);", 1)[0]
+        self.assertIn("if (!box.checked) {", block)
+        self.assertIn("renderTools();", block)
+
+    def test_results_follow_the_active_pick(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        self.assertIn("resultPick: []", js)
+        self.assertIn("selectionResultIds(S.resultPick,", js)
+        self.assertNotIn("selectionResultIds(Array.from(S.selection)", js)
+        for name, expected in [("startRun", "S.resultPick = pick.slice()"),
+                               ("checkStatus", "S.resultPick = pick.slice()"),
+                               ("loadHistory", "S.resultPick = []")]:
+            body = js.split(f"async function {name}(", 1)[1].split("\nasync function ", 1)[0]
+            # 请求成功后才切换结果视图，失败时保留原有结果。
+            self.assertGreater(body.index(expected), body.index("await api("), name)
+        self.assertIn("S.resultPick = Array.from(S.selection)", js)
+
+    def test_secret_inputs_keep_typed_value_after_rerender(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        body = js.split("function renderParams(", 1)[1].split("\nfunction ", 1)[0]
+        # 重新渲染（如切换工具选择）不能丢掉用户刚输入的口令。
+        self.assertIn("input.value = S.params[field.key]", body)
+
+    def test_start_run_guards_double_submit(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        busy = js.split("function isBusy(", 1)[1].split("\nfunction ", 1)[0]
+        self.assertIn("S.starting", busy)
+        body = js.split("async function startRun(", 1)[1].split("\nasync function ", 1)[0]
+        self.assertLess(body.index("S.starting = true"), body.index("await api("))
+        self.assertIn("S.starting = false", body)
+
+    def test_finish_run_defaults_verify_once(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        block = js.split("function finishRun(", 1)[1].split("function ", 1)[0]
+        self.assertEqual(block.count('entry.verify = "not_run"'), 1)
+
+    def test_plan_refreshes_after_busy_period(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        checking = js.split("function setChecking(", 1)[1].split("\nfunction ", 1)[0]
+        self.assertIn("schedulePlan(0);", checking)
+        finish = js.split("function finishRun(", 1)[1].split("\nfunction ", 1)[0]
+        self.assertIn("schedulePlan(0);", finish)
+
+    def test_failed_row_uses_real_button(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn('setAttribute("role", "button")', js)
+        for token in ["log-jump", "在日志中定位", 'closest("button")']:
+            self.assertIn(token, js)
+
+    def test_object_url_is_revoked(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        js = (root / "app.js").read_text(encoding="utf-8")
+        self.assertEqual(js.count("createObjectURL"), js.count("revokeObjectURL"))

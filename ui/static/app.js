@@ -10,14 +10,19 @@ const S = {
   params: {},
   resetParams: new Set(),
   originalParams: {},
+  defaults: {},
   secrets: {},
   clearSecretsApplied: new Set(),
   planTimer: null,
   planSeq: 0,
   lastPlan: null,
   running: false,
+  checking: false,
+  starting: false,
   results: new Map(),
+  resultPick: [],
   activeRunId: null,
+  viewedRunId: null,
   eventSource: null,
   retries: 0,
   installed: [],
@@ -27,6 +32,9 @@ const S = {
   tab: "results",
   collapsedGroups: new Set(),
   logGroups: new Map(),
+  logLineTotal: 0,
+  logLines: [],
+  lastFocus: null,
 };
 
 const MAIN_TABS = ["tools", "runs"];
@@ -72,6 +80,13 @@ function setTab(name) {
     if (panel) panel.hidden = !active;
   });
   if (changed && name === "history") refreshHistory();
+  if (changed && name === "log" && $("autoscroll").checked) {
+    const log = $("log");
+    log.scrollTop = log.scrollHeight;
+    S.logGroups.forEach((group) => {
+      group.body.scrollTop = group.body.scrollHeight;
+    });
+  }
 }
 
 function make(tag, text, cls) {
@@ -146,7 +161,7 @@ function selectedCatalogIds() {
   return ids;
 }
 
-function statusLabel(status) {
+function statusLabel(status, phase) {
   const labels = {
     ok: "成功",
     failed: "失败",
@@ -155,7 +170,70 @@ function statusLabel(status) {
     not_run: "未执行",
     running: "执行中",
   };
+  if (phase === "verify") {
+    const verify = {
+      ok: "通过",
+      failed: "未通过",
+      skipped: "跳过",
+      planned: "待执行",
+      not_run: "未执行",
+      running: "执行中",
+    };
+    return verify[status] || status || "未执行";
+  }
   return labels[status] || status || "未执行";
+}
+
+const ADHOC_RE = /^(apt|npm|snap):([A-Za-z0-9@._+/-]+)$/;
+
+function validAdhocToken(token) {
+  const match = ADHOC_RE.exec(String(token || "").trim());
+  return Boolean(match && !match[2].startsWith("-"));
+}
+
+// 与服务端 normalize_adhoc_id 保持一致：spec 小写后把非法字符替换为 "-"。
+function normalizeAdhocId(token) {
+  const match = ADHOC_RE.exec(String(token || "").trim());
+  if (!match || match[2].startsWith("-")) return null;
+  const ident = match[2].toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+  return ident || null;
+}
+
+// 选择项（含内联包）先占位，再追加已经产生结果的工具，避免重复。
+function selectionResultIds(selection, toolIds) {
+  const ids = [];
+  const seen = new Set();
+  const add = (id) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  (selection || []).forEach((token) => {
+    add(catalogId(token) ? token : normalizeAdhocId(token));
+  });
+  (toolIds || []).forEach(add);
+  return ids;
+}
+
+function canLoadHistory(running) {
+  return !running;
+}
+
+function joinLogLines(lines) {
+  return lines.join("\n");
+}
+
+// 日志按到达顺序入队；超出上限时丢弃最旧的，保证复制/下载仍是原始时间序。
+function appendLogLine(lines, line, limit) {
+  lines.push(line);
+  if (limit > 0 && lines.length > limit) {
+    lines.splice(0, lines.length - limit);
+  }
+  return lines;
+}
+
+function logFileName(runId) {
+  return "os-config-" + (runId || "log") + ".log";
 }
 
 // ---------- 工具清单 ----------
@@ -196,6 +274,7 @@ function renderTools() {
       box.type = "checkbox";
       box.value = tool.id;
       box.checked = S.selection.has(tool.id);
+      box.disabled = isBusy();
       box.addEventListener("change", () => {
         if (box.checked) S.selection.add(tool.id);
         else S.selection.delete(tool.id);
@@ -221,8 +300,12 @@ function renderTools() {
       box.type = "checkbox";
       box.value = token;
       box.checked = true;
+      box.disabled = isBusy();
       box.addEventListener("change", () => {
-        if (!box.checked) S.selection.delete(token);
+        if (!box.checked) {
+          S.selection.delete(token);
+          renderTools();
+        }
         selectionChanged();
       });
       line.appendChild(box);
@@ -241,10 +324,16 @@ function visibleIds() {
     .map((tool) => tool.id);
 }
 
-function selectionChanged() {
+function selectionChanged(resetPreset) {
+  if (resetPreset !== false) $("preset").value = "";
   updateRunButton();
   renderParams();
   schedulePlan(300);
+}
+
+function defaultValue(field) {
+  if (Object.prototype.hasOwnProperty.call(S.defaults, field.key)) return S.defaults[field.key];
+  return "";
 }
 
 function schedulePlan(delay) {
@@ -253,6 +342,7 @@ function schedulePlan(delay) {
 }
 
 async function runPlan() {
+  if (isBusy()) return;
   const pick = Array.from(S.selection);
   if (!pick.length) {
     S.lastPlan = null;
@@ -371,15 +461,24 @@ function renderParams() {
         if (field.secret) input.autocomplete = "new-password";
       }
       input.id = "param-" + field.key;
-      if (!field.secret) input.value = currentValue(field);
-      else if (Object.prototype.hasOwnProperty.call(S.secrets, field.key) && S.secrets[field.key]) {
+      if (!field.secret) {
+        input.value = currentValue(field);
+      } else if (Object.prototype.hasOwnProperty.call(S.params, field.key)) {
+        // 重新渲染时保留用户刚输入、尚未提交的口令。
+        input.value = S.params[field.key];
+        if (S.clearSecretsApplied.has(field.key) && S.secrets[field.key]) {
+          input.placeholder = "将清除已保存的口令";
+        }
+      } else if (S.clearSecretsApplied.has(field.key) && S.secrets[field.key]) {
+        input.placeholder = "将清除已保存的口令";
+      } else if (Object.prototype.hasOwnProperty.call(S.secrets, field.key) && S.secrets[field.key]) {
         input.placeholder = "已设置（输入新值以覆盖）";
       }
       input.addEventListener("input", () => {
         S.resetParams.delete(field.key);
         if (field.secret && input.value === "") {
           delete S.params[field.key];
-        } else if (!field.secret && input.value === (Object.prototype.hasOwnProperty.call(S.originalParams, field.key) ? S.originalParams[field.key] : "")) {
+        } else if (!field.secret && input.value === defaultValue(field)) {
           delete S.params[field.key];
         } else {
           S.params[field.key] = input.value;
@@ -391,8 +490,12 @@ function renderParams() {
       reset.addEventListener("click", () => {
         delete S.params[field.key];
         S.resetParams.add(field.key);
-        input.value = field.secret ? "" : (Object.prototype.hasOwnProperty.call(S.originalParams, field.key) ? S.originalParams[field.key] : "");
-        if (field.secret) input.placeholder = "恢复为默认";
+        input.value = field.secret ? "" : defaultValue(field);
+        if (field.secret) {
+          input.placeholder = S.clearSecretsApplied.has(field.key) && S.secrets[field.key]
+            ? "将清除已保存的口令"
+            : "保存后恢复为默认";
+        }
       });
       line.appendChild(reset);
       section.appendChild(line);
@@ -444,17 +547,40 @@ async function renderSudo() {
 
 // ---------- 运行与事件 ----------
 
+function isBusy() {
+  return S.running || S.checking || S.starting;
+}
+
 function updateRunButton() {
-  $("run-btn").disabled = S.running || S.selection.size === 0;
+  $("run-btn").disabled = isBusy() || S.selection.size === 0;
+}
+
+function updateButtons() {
+  const busy = isBusy();
+  $("plan-btn").disabled = busy;
+  $("remove-btn").disabled = busy;
+  $("status-btn").disabled = busy;
+  updateRunButton();
+}
+
+function updateSelectionControls() {
+  const busy = isBusy();
+  ["preset", "select-all", "select-none", "adhoc-input", "adhoc-add"].forEach((id) => {
+    const control = $(id);
+    if (control) control.disabled = busy;
+  });
+  $("tool-list").querySelectorAll("input[type=checkbox]").forEach((box) => {
+    box.disabled = busy;
+  });
 }
 
 function setRunning(running) {
   S.running = running;
-  $("run-state").textContent = running ? "运行中" : "空闲";
-  $("run-state").className = "pill " + (running ? "busy" : "");
-  $("plan-btn").disabled = running;
-  $("remove-btn").disabled = running;
-  updateRunButton();
+  $("run-state").textContent = running ? "运行中" : (S.checking ? "检查中…" : "空闲");
+  $("run-state").className = "pill " + (running || S.checking ? "busy" : "");
+  updateButtons();
+  updateSelectionControls();
+  updateHistoryAvailability();
   if (!running) {
     $("log-state").hidden = true;
     $("current-item").hidden = true;
@@ -463,10 +589,26 @@ function setRunning(running) {
   }
 }
 
+function setChecking(checking) {
+  S.checking = checking;
+  if (!S.running) {
+    $("run-state").textContent = checking ? "检查中…" : "空闲";
+    $("run-state").className = "pill " + (checking ? "busy" : "");
+  }
+  updateButtons();
+  updateSelectionControls();
+  updateHistoryAvailability();
+  if (!checking) schedulePlan(0);
+}
+
 function clearLog() {
   clear($("log"));
   S.logGroups = new Map();
+  S.logLineTotal = 0;
+  S.logLines = [];
 }
+
+const MAX_LOG_LINES = 5000;
 
 // 与服务端 _LOG_ITEM_RE 一致：`[INFO] [git] ...` 的第一段才是条目 id。
 const LOG_ITEM_RE = /^\[(?:INFO|OK|WARN|ERROR|DEBUG)\]\s+\[([A-Za-z0-9][A-Za-z0-9_-]*)\]/;
@@ -497,15 +639,46 @@ function logGroup(toolId) {
 }
 
 function appendLog(line, cls, toolId) {
+  appendLogLine(S.logLines, line, MAX_LOG_LINES);
   const group = logGroup(toolId);
   const row = make("span", line, "log-line" + (cls ? " " + cls : ""));
   group.body.appendChild(row);
   group.lines += 1;
+  S.logLineTotal += 1;
   group.count.textContent = String(group.lines);
   if ($("autoscroll").checked) {
     group.body.scrollTop = group.body.scrollHeight;
     $("log").scrollTop = $("log").scrollHeight;
   }
+  trimLog();
+}
+
+function trimLog() {
+  while (S.logLineTotal > MAX_LOG_LINES) {
+    const section = $("log").querySelector(".log-group");
+    if (!section) break;
+    const line = section.querySelector(".log-line");
+    if (!line) {
+      section.remove();
+      continue;
+    }
+    const key = section.getAttribute("data-tool") || "";
+    const group = S.logGroups.get(key);
+    line.remove();
+    S.logLineTotal -= 1;
+    if (group) {
+      group.lines -= 1;
+      group.count.textContent = String(group.lines);
+      if (!group.lines) {
+        group.section.remove();
+        S.logGroups.delete(key);
+      }
+    }
+  }
+}
+
+function collectLogLines() {
+  return S.logLines.slice();
 }
 
 function handleItem(event) {
@@ -542,10 +715,7 @@ function showRollback(event) {
 }
 
 function resultIds() {
-  return Array.from(new Set([
-    ...selectedCatalogIds(),
-    ...Array.from(S.results.keys()).filter(catalogId),
-  ]));
+  return selectionResultIds(S.resultPick, Array.from(S.results.keys()));
 }
 
 function renderSummary(ids) {
@@ -571,6 +741,8 @@ function renderSummary(ids) {
 
 function renderResults() {
   const body = $("results");
+  const scroller = $("results-scroll");
+  const scrollTop = scroller ? scroller.scrollTop : 0;
   clear(body);
   const ids = resultIds();
   renderSummary(ids);
@@ -580,23 +752,34 @@ function renderResults() {
     cell.colSpan = 3;
     row.appendChild(cell);
     body.appendChild(row);
+    if (scroller) scroller.scrollTop = scrollTop;
     return;
   }
   ids.forEach((id) => {
     const entry = S.results.get(id) || { install: null, verify: null };
     const row = document.createElement("tr");
-    row.appendChild(make("td", id));
+    const idCell = make("td", null, "result-id-cell");
+    idCell.appendChild(make("span", id, "result-id"));
+    row.appendChild(idCell);
     const install = entry.install || "not_run";
     const verify = entry.verify || "not_run";
     row.appendChild(make("td", statusLabel(install), "status status-" + install));
-    row.appendChild(make("td", statusLabel(verify), "status status-" + verify));
-    if (install === "failed" || verify === "failed") row.className = "failed-row";
-    row.addEventListener("click", () => {
-      if (install !== "failed" && verify !== "failed") return;
-      highlightLog(id);
-    });
+    row.appendChild(make("td", statusLabel(verify, "verify"), "status status-" + verify));
+    if (install === "failed" || verify === "failed") {
+      row.className = "failed-row";
+      const jumpButton = make("button", "日志", "tiny ghost log-jump");
+      jumpButton.type = "button";
+      jumpButton.setAttribute("aria-label", "在日志中定位 " + id);
+      jumpButton.addEventListener("click", () => highlightLog(id));
+      idCell.appendChild(jumpButton);
+      row.addEventListener("click", (ev) => {
+        if (ev.target.closest("button")) return;
+        highlightLog(id);
+      });
+    }
     body.appendChild(row);
   });
+  if (scroller) scroller.scrollTop = scrollTop;
 }
 
 function highlightLog(id) {
@@ -623,13 +806,10 @@ function highlightLog(id) {
 }
 
 function finishRun(event) {
-  const verifyOn = $("verify-after").checked;
-  const installFailed = S.results.size === 0 || Array.from(S.results.values()).some((e) => e.install === "failed");
   const ids = resultIds();
   ids.forEach((id) => {
     const entry = S.results.get(id) || { install: null, verify: null };
     if (!entry.install) entry.install = "not_run";
-    if (!entry.verify && (installFailed || !verifyOn || S.rollingBack)) entry.verify = "not_run";
     if (!entry.verify) entry.verify = "not_run";
     S.results.set(id, entry);
   });
@@ -637,6 +817,7 @@ function finishRun(event) {
   setRunning(false);
   setMainTab("runs");
   setTab("results");
+  schedulePlan(0);
   if (S.eventSource) S.eventSource.close();
   S.eventSource = null;
   toast(event && event.rc === 0 ? "执行完成" : "执行结束，请查看结果", event && event.rc === 0 ? "ok" : "warn");
@@ -678,9 +859,6 @@ function connectEvents(runId) {
   source.addEventListener("rollback", (ev) => {
     showRollback(JSON.parse(ev.data));
   });
-  source.addEventListener("summary", (ev) => {
-    S.summary = JSON.parse(ev.data);
-  });
   source.addEventListener("done", (ev) => {
     let data = {};
     try {
@@ -701,16 +879,23 @@ function connectEvents(runId) {
 }
 
 async function checkStatus() {
-  if (S.running) return;
+  if (S.running) {
+    toast("正在执行任务，无法检查状态", "warn");
+    return;
+  }
+  if (S.checking) return;
   const pick = Array.from(S.selection);
   if (!pick.length) {
     toast("请先选择工具", "warn");
     return;
   }
+  setChecking(true);
   try {
     const data = await api("GET", "/api/status?pick=" + encodeURIComponent(pick.join(",")));
+    S.resultPick = pick.slice();
     S.results = new Map();
     S.rollingBack = false;
+    S.viewedRunId = null;
     clearRollbackBanner();
     (data.items || []).forEach((item) => {
       if (!item.id) return;
@@ -729,12 +914,14 @@ async function checkStatus() {
     }
   } catch (err) {
     /* toast 已由 api() 处理 */
+  } finally {
+    setChecking(false);
   }
 }
 
-async function startRun(verb) {
-  if (S.running) return;
-  const pick = Array.from(S.selection);
+async function startRun(verb, pickOverride) {
+  if (isBusy()) return;
+  const pick = pickOverride ? Array.from(pickOverride) : Array.from(S.selection);
   if (!pick.length) {
     toast("请先选择工具", "warn");
     return;
@@ -749,22 +936,33 @@ async function startRun(verb) {
     force: $("force").checked,
   };
   if (verb === "remove") body.confirm = true;
-  clearLog();
-  clearRollbackBanner();
-  S.results = new Map();
-  S.rollingBack = false;
-  renderResults();
-  $("current-item").hidden = true;
+  S.starting = true;
+  updateButtons();
+  updateSelectionControls();
+  updateHistoryAvailability();
   try {
     const data = await api("POST", "/api/run", body);
+    clearLog();
+    clearRollbackBanner();
+    S.results = new Map();
+    S.resultPick = pick.slice();
+    S.rollingBack = false;
+    renderResults();
+    $("current-item").hidden = true;
     S.activeRunId = data.run_id;
+    S.viewedRunId = data.run_id;
     setRunning(true);
     setMainTab("runs");
     setTab("log");
     connectEvents(S.activeRunId);
     toast("已开始执行：" + data.run_id, "ok");
   } catch (err) {
-    setRunning(false);
+    /* toast 已由 api() 处理 */
+  } finally {
+    S.starting = false;
+    updateButtons();
+    updateSelectionControls();
+    updateHistoryAvailability();
   }
 }
 
@@ -826,6 +1024,20 @@ function renderRemoveList() {
   });
 }
 
+function openModal() {
+  S.lastFocus = document.activeElement;
+  $("confirm-modal").hidden = false;
+  if ($("app")) $("app").inert = true;
+  $("confirm-cancel").focus();
+}
+
+function closeModal() {
+  $("confirm-modal").hidden = true;
+  if ($("app")) $("app").inert = false;
+  if (S.lastFocus && typeof S.lastFocus.focus === "function") S.lastFocus.focus();
+  S.lastFocus = null;
+}
+
 function openRemoveModal() {
   const picked = Array.from($("remove-list").querySelectorAll("input:checked")).map((b) => b.value);
   if (!picked.length) {
@@ -840,15 +1052,22 @@ function openRemoveModal() {
     return id + artifacts;
   });
   $("confirm-text").textContent = "将卸载：" + details.join("；") + "。该操作会删除已写入的配置，确认继续？";
-  $("confirm-modal").hidden = false;
+  openModal();
   $("confirm-ok").onclick = async () => {
-    $("confirm-modal").hidden = true;
-    S.selection = new Set(picked);
-    await startRun("remove");
+    closeModal();
+    await startRun("remove", picked);
   };
 }
 
 // ---------- 历史 ----------
+
+function updateHistoryAvailability() {
+  const enabled = canLoadHistory(isBusy());
+  $("history").querySelectorAll(".history-row").forEach((button) => {
+    button.disabled = !enabled;
+    button.title = enabled ? "" : "执行中无法回看历史";
+  });
+}
 
 async function refreshHistory() {
   try {
@@ -864,19 +1083,29 @@ async function refreshHistory() {
       button.type = "button";
       button.appendChild(make("span", run.run_id, "history-id"));
       button.appendChild(make("span", (run.verb || "") + " · rc=" + run.rc, "history-meta"));
-      button.addEventListener("click", () => loadHistory(run.run_id));
+      button.addEventListener("click", () => {
+        if (!canLoadHistory(isBusy())) return;
+        loadHistory(run.run_id);
+      });
       box.appendChild(button);
     });
+    updateHistoryAvailability();
   } catch (err) {
     /* toast 已由 api() 处理 */
   }
 }
 
 async function loadHistory(runId) {
+  if (!canLoadHistory(isBusy())) {
+    toast("执行中无法回看历史", "warn");
+    return;
+  }
   try {
     const data = await api("GET", "/api/history/" + encodeURIComponent(runId));
+    S.resultPick = [];
     S.results = new Map();
     S.rollingBack = false;
+    S.viewedRunId = runId;
     clearRollbackBanner();
     (data.events || []).forEach((event) => {
       if (event.event === "item_end") handleItem(event);
@@ -901,7 +1130,7 @@ async function loadHistory(runId) {
 
 async function copyLog() {
   try {
-    await navigator.clipboard.writeText($("log").textContent || "");
+    await navigator.clipboard.writeText(joinLogLines(collectLogLines()));
     toast("日志已复制", "ok");
   } catch (err) {
     toast("复制失败，请手动选择日志", "error");
@@ -909,11 +1138,11 @@ async function copyLog() {
 }
 
 function downloadLog() {
-  const blob = new Blob([$("log").textContent || ""], { type: "text/plain;charset=utf-8" });
+  const blob = new Blob([joinLogLines(collectLogLines())], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "os-config-" + (S.activeRunId || "log") + ".log";
+  anchor.download = logFileName(S.viewedRunId);
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);
@@ -933,9 +1162,11 @@ async function bootstrap() {
     S.paramGroups = cat.param_groups || [];
     S.secrets = st.secrets || {};
     S.originalParams = Object.assign({}, st.params || {});
+    S.defaults = st.defaults || {};
     const selection = st.selection || {};
     const tools = Array.isArray(selection.tools) ? selection.tools : defaultProfileTools();
     S.selection = new Set([].concat(tools, selection.adhoc || []));
+    S.resultPick = Array.from(S.selection);
     renderPreset();
     renderTools();
     renderParams();
@@ -946,6 +1177,7 @@ async function bootstrap() {
     refreshHistory();
     schedulePlan(0);
     if (st.running) {
+      S.viewedRunId = st.current && st.current.run_id;
       setMainTab("runs");
       setTab("log");
       connectEvents(st.current && st.current.run_id);
@@ -955,28 +1187,67 @@ async function bootstrap() {
   }
 }
 
+function addAdhoc() {
+  if (isBusy()) return;
+  const input = $("adhoc-input");
+  const token = (input.value || "").trim();
+  if (!validAdhocToken(token)) {
+    toast("格式应为 apt:/npm:/snap: 加包名，例如 apt:jq", "warn");
+    return;
+  }
+  if (S.selection.has(token)) {
+    toast("已在清单中：" + token, "warn");
+    return;
+  }
+  const ident = normalizeAdhocId(token);
+  if (S.catalogById.has(ident)) {
+    toast("与 catalog 工具重名：" + ident, "warn");
+    return;
+  }
+  const duplicate = Array.from(S.selection).some((item) =>
+    (catalogId(item) ? item : normalizeAdhocId(item)) === ident);
+  if (duplicate) {
+    toast("已存在相同 id 的选择：" + ident, "warn");
+    return;
+  }
+  S.selection.add(token);
+  input.value = "";
+  renderTools();
+  selectionChanged();
+}
+
 function wireEvents() {
   $("search").addEventListener("input", () => {
     renderTools();
   });
   $("preset").addEventListener("change", () => {
+    if (isBusy()) return;
     const name = $("preset").value;
     if (!name) return;
     const profile = S.profiles.find((p) => p.name === name);
     if (!profile) return;
     S.selection = new Set(profile.tools || []);
     renderTools();
-    selectionChanged();
+    selectionChanged(false);
   });
   $("select-all").addEventListener("click", () => {
+    if (isBusy()) return;
     visibleIds().forEach((id) => S.selection.add(id));
     renderTools();
     selectionChanged();
   });
   $("select-none").addEventListener("click", () => {
+    if (isBusy()) return;
     visibleIds().forEach((id) => S.selection.delete(id));
     renderTools();
     selectionChanged();
+  });
+  $("adhoc-add").addEventListener("click", addAdhoc);
+  $("adhoc-input").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      addAdhoc();
+    }
   });
   $("keep-going").addEventListener("change", () => {
     const hint = document.querySelector(".options .hint");
@@ -993,8 +1264,26 @@ function wireEvents() {
   $("status-btn").addEventListener("click", () => checkStatus());
   $("run-btn").addEventListener("click", () => startRun("install"));
   $("remove-btn").addEventListener("click", openRemoveModal);
-  $("confirm-cancel").addEventListener("click", () => {
-    $("confirm-modal").hidden = true;
+  $("confirm-cancel").addEventListener("click", closeModal);
+  $("confirm-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("confirm-modal")) closeModal();
+  });
+  $("confirm-modal").addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeModal();
+      return;
+    }
+    if (ev.key !== "Tab") return;
+    const focusables = [$("confirm-cancel"), $("confirm-ok")];
+    const index = focusables.indexOf(document.activeElement);
+    if (ev.shiftKey && index <= 0) {
+      ev.preventDefault();
+      focusables[focusables.length - 1].focus();
+    } else if (!ev.shiftKey && index === focusables.length - 1) {
+      ev.preventDefault();
+      focusables[0].focus();
+    }
   });
   MAIN_TABS.forEach((name) => {
     const button = $(name + "-tab");
@@ -1031,7 +1320,29 @@ function wireEvents() {
   $("history-refresh").addEventListener("click", refreshHistory);
   $("log-copy").addEventListener("click", copyLog);
   $("log-download").addEventListener("click", downloadLog);
+  $("log").addEventListener("scroll", () => {
+    if (!S.running) return;
+    const box = $("log");
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 8;
+    if (!atBottom) $("autoscroll").checked = false;
+  });
 }
 
-wireEvents();
-bootstrap();
+if (typeof document !== "undefined") {
+  wireEvents();
+  bootstrap();
+}
+
+// 纯函数导出，供 Node 内置 test runner 覆盖；浏览器环境无 module。
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    statusLabel: statusLabel,
+    validAdhocToken: validAdhocToken,
+    normalizeAdhocId: normalizeAdhocId,
+    selectionResultIds: selectionResultIds,
+    canLoadHistory: canLoadHistory,
+    joinLogLines: joinLogLines,
+    appendLogLine: appendLogLine,
+    logFileName: logFileName,
+  };
+}

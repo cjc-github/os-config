@@ -260,15 +260,23 @@ _backend_snap_install() {
 }
 
 _backend_snap_update() {
-  local id="$1" pkg any=0
+  local id="$1" pkg any=0 missing=()
   _backend_require snap || return 1
   for pkg in ${CAT_PACKAGES[$id]}; do
     if _snap_is_installed "$pkg"; then
       require_sudo || return 1
       run_step "snap refresh $pkg" with_retry 3 5 -- sudo snap refresh "$pkg" || return 1
       any=1
+    else
+      missing+=("$pkg")
     fi
   done
+  # 部分已装时也要补齐其余包，否则 update 会报成功却留下未安装项。
+  if (( ${#missing[@]} > 0 )); then
+    require_sudo || return 1
+    run_step "snap install ${missing[*]}" with_retry 3 5 -- sudo snap install "${missing[@]}" || return 1
+    any=1
+  fi
   (( any == 1 )) && return 0
   _backend_snap_install "$id"
 }

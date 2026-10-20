@@ -11,10 +11,33 @@
 #   PROXY_ENABLED   默认 true；为 true 时写 http.proxy/https.proxy
 #   PROXY_HOST/PORT 留空自动推导（复用 util.sh 的 resolve_proxy_endpoint）
 #
-# remove 语义：只 unset 本动作写入的代理键，绝不删除用户身份（user.name/email）。
+# remove 语义：把代理键还原为「本动作首次改写前」的原值（记录在
+#   $STATE_DIR/actions/git/），原本不存在的键则 unset；绝不删除用户身份
+#   （user.name/email）。
+
+# 首次改写代理键前记录原值，供 remove 还原；已有记录不覆盖（保留最早的原值）。
+_git_record_original() {
+  local dir="$1" key="$2" cur
+  [[ -f "$dir/$key.orig" ]] && return 0
+  if cur=$(git_cfg_get "$key"); then
+    printf '%s\n' "$cur" >"$dir/$key.orig"
+  else
+    return 0
+  fi
+}
+
+# --global 的实际写入路径：~/.gitconfig，或已存在 XDG 配置且 ~/.gitconfig 缺失时写 XDG。
+_git_global_config_path() {
+  local xdg="${XDG_CONFIG_HOME:-$HOME/.config}/git/config"
+  if [[ ! -e "$HOME/.gitconfig" && -f "$xdg" ]]; then
+    printf '%s\n' "$xdg"
+  else
+    printf '%s\n' "$HOME/.gitconfig"
+  fi
+}
 
 action_git_apply() {
-  local id="$1" cur key
+  local id="$1" cur key dir
   : "${PROXY_ENABLED:=true}"
   : "${PROXY_HOST:=}"
   : "${PROXY_PORT:=}"
@@ -27,6 +50,7 @@ action_git_apply() {
   if [[ -n "${GIT_USER_NAME:-}" ]]; then
     cur=$(git_cfg_get user.name || true)
     if [[ "$cur" != "$GIT_USER_NAME" || "${FORCE:-0}" == 1 ]]; then
+      register_rollback "$(_git_global_config_path)" || return 1
       run_step "git config user.name" git config --global user.name "$GIT_USER_NAME" || return 1
     else
       log_info "[$id] user.name 已是预期值，跳过"
@@ -39,6 +63,7 @@ action_git_apply() {
   if [[ -n "${GIT_USER_EMAIL:-}" ]]; then
     cur=$(git_cfg_get user.email || true)
     if [[ "$cur" != "$GIT_USER_EMAIL" || "${FORCE:-0}" == 1 ]]; then
+      register_rollback "$(_git_global_config_path)" || return 1
       run_step "git config user.email" git config --global user.email "$GIT_USER_EMAIL" || return 1
     else
       log_info "[$id] user.email 已是预期值，跳过"
@@ -68,9 +93,12 @@ action_git_apply() {
   fi
   ensure_proxy_host_reachable "$RESOLVED_PROXY_HOST" "$RESOLVED_PROXY_PORT" "$PROXY_SOURCE_IP" || return 1
 
+  dir="$(state_action_dir git)" || return 1
   for key in http.proxy https.proxy; do
     cur=$(git_cfg_get "$key" || true)
     if [[ "$cur" != "$RESOLVED_PROXY_URL" || "${FORCE:-0}" == 1 ]]; then
+      _git_record_original "$dir" "$key" || return 1
+      register_rollback "$(_git_global_config_path)" || return 1
       run_step "git config $key" git config --global "$key" "$RESOLVED_PROXY_URL" || return 1
     else
       log_info "[$id] $key 已是预期值，跳过"
@@ -80,20 +108,29 @@ action_git_apply() {
 }
 
 action_git_remove() {
-  local id="$1" key cur
+  local id="$1" key cur rc=0 dir orig
   if ! cmd_exists git; then
     log_info "[$id] git 不可用，无需还原代理键"
     return 0
   fi
+  dir="$(state_action_dir git)" || return 1
   for key in http.proxy https.proxy; do
-    cur=$(git_cfg_get "$key" || true)
-    if [[ -n "$cur" ]]; then
-      run_step "git config --unset $key" git config --global --unset "$key" || true
+    orig="$dir/$key.orig"
+    if [[ -f "$orig" ]]; then
+      cur=$(cat -- "$orig")
+      run_step "git config 还原 $key" git config --global "$key" "$cur" || rc=1
     else
-      log_debug "[$id] $key 本就不存在"
+      cur=$(git_cfg_get "$key" || true)
+      if [[ -n "$cur" ]]; then
+        run_step "git config --unset $key" git config --global --unset "$key" || rc=1
+      else
+        log_debug "[$id] $key 本就不存在"
+      fi
     fi
   done
-  log_ok "[$id] 已移除 git 代理配置（保留 user.name/user.email）"
+  (( rc == 0 )) || { log_error "[$id] 部分 git 代理键移除失败"; return 1; }
+  rm -rf -- "$dir"
+  log_ok "[$id] 已还原 git 代理配置（保留 user.name/user.email）"
 }
 
 action_git_verify() {

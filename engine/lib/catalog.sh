@@ -32,12 +32,26 @@ catalog_expand_vars() {
 }
 
 _catalog_valid_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
+# 包名会做词拆分后传给 apt/npm/snap：不得含空白，也不得以 - 开头（避免参数注入）。
+_catalog_valid_pkg_spec() { [[ "$1" =~ ^[A-Za-z0-9@][A-Za-z0-9._+/@=:~-]*$ ]]; }
 
 # catalog_define <id> —— 为临时（profile 内联 backend:spec）工具注册条目
 catalog_define_adhoc() {
   local id="$1" backend="$2" packages="$3" commands="$4" desc="${5:-临时指定}"
   _catalog_valid_id "$id" || return 1
-  [[ -n "${CAT_TYPE[$id]+x}" ]] && return 0
+  _catalog_valid_pkg_spec "$packages" || {
+    log_error "临时工具 $id 的包名非法：$packages（不得含空白或以 - 开头）"
+    return 1
+  }
+  if [[ -n "${CAT_TYPE[$id]+x}" ]]; then
+    if [[ "${CAT_TYPE[$id]}" == package \
+          && "${CAT_BACKEND[$id]}" == "$backend" \
+          && "${CAT_PACKAGES[$id]}" == "$packages" ]]; then
+      return 0
+    fi
+    log_error "临时工具 $id 与已有 catalog 条目冲突（已有：${CAT_TYPE[$id]} ${CAT_BACKEND[$id]:-} ${CAT_PACKAGES[$id]:-}；请求：package $backend $packages）"
+    return 1
+  fi
   CAT_ORDER+=("$id")
   CAT_TYPE[$id]=package
   CAT_BACKEND[$id]="$backend"
@@ -145,6 +159,11 @@ catalog_validate() {
         ;;
       config)
         [[ -n "${CAT_ACTION[$id]}" ]] || { log_error "catalog [$id] 缺少 action"; return 1; }
+        # action 会拼进 engine/actions/<action>.sh 路径；限制为标识符以防路径穿越。
+        [[ "${CAT_ACTION[$id]}" =~ ^[a-z][a-z0-9_-]*$ ]] || {
+          log_error "catalog [$id] action 非法：${CAT_ACTION[$id]}（仅允许小写字母、数字、_、-）"
+          return 1
+        }
         ;;
       *) log_error "catalog [$id] type 非法：${type:-<空>}（应为 package/config）"; return 1 ;;
     esac
