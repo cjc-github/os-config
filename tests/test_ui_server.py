@@ -549,3 +549,13 @@ class FrontendTests(unittest.TestCase):
         self.assertNotIn("max-width: 1280px", css)
         self.assertIn("width: 100%", css)
         self.assertIn("min-height: 100%", css)
+
+    def test_panels_fill_viewport(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        css = (root / "style.css").read_text(encoding="utf-8")
+        for token in [".mainpanel {", "grid-template-rows: minmax(0, 1fr)",
+                      "min-height: 0;"]:
+            self.assertIn(token, css)
+        self.assertNotIn("height: 460px", css)
+        self.assertNotIn("height: 380px", css)
+        self.assertNotIn("height: 420px", css)

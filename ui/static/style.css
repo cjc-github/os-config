@@ -50,6 +50,7 @@ body {
 #app {
   width: 100%;
   max-width: none;
+  height: 100%;
   min-height: 100%;
   margin: 0;
   padding: 18px 16px 28px;
@@ -135,19 +136,31 @@ body {
 .pill.busy { color: var(--accent); border-color: var(--accent); }
 
 .layout {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(280px, 1fr) minmax(340px, 1.25fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
 }
 
 @media (max-width: 980px) {
-  .layout { grid-template-columns: 1fr; }
+  #app { height: auto; min-height: 100%; }
+  .mainpanel { flex: none; }
+  .layout {
+    flex: none;
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+  }
+  .tools-panel, .params-panel { height: 70vh; min-height: 360px; }
+  .workspace { flex: none; height: 70vh; }
 }
 
 /* ---------- 主 tab：工具与参数 / 运行详情 ---------- */
 
 .maintabs {
+  flex: none;
   display: flex;
   gap: 2px;
   padding: 0 8px;
@@ -178,6 +191,13 @@ body {
 }
 .maintab:focus-visible { outline-offset: -3px; }
 
+.mainpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .mainpanel[hidden] { display: none; }
 
 .panel {
@@ -185,6 +205,13 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 12px 14px;
+}
+
+.tools-panel, .params-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .panel-head {
@@ -232,7 +259,8 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
   outline-offset: 2px;
 }
 
-.tool-list { display: flex; flex-direction: column; gap: 10px; max-height: 420px; overflow: auto; }
+.tool-list { display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+.tools-panel > .tool-list { flex: 1; min-height: 0; max-height: none; }
 .tool-group-title { font-size: 12px; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 4px; }
 .tool-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
 .tool-row:hover { background: var(--bg); }
@@ -242,7 +270,8 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 
 .params { display: flex; flex-direction: column; gap: 10px; }
 .params-scroll {
-  height: 460px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-right: 4px;
@@ -290,7 +319,14 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 
 /* ---------- 运行详情：横向 tab ---------- */
 
-.workspace { padding: 0; overflow: hidden; }
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
 
 .tabbar {
   display: flex;
@@ -367,11 +403,18 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
   white-space: nowrap;
 }
 
-.tab-panel { padding: 12px 14px 14px; }
+.tab-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px 14px;
+}
 .tab-panel[hidden] { display: none; }
 
 .results-scroll {
-  height: 380px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -400,7 +443,14 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
   font-weight: 600;
 }
 
-.history { display: flex; flex-direction: column; gap: 6px; }
+.history {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .history[hidden] { display: none; }
 .history-row {
   display: flex;
@@ -417,8 +467,9 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 .history-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .log {
+  flex: 1;
+  min-height: 0;
   margin: 0;
-  height: 420px;
   overflow: auto;
   background: var(--log-bg);
   color: var(--log-text);
@@ -535,7 +586,4 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
   .maintab { padding: 10px 12px 8px; }
   .tab { padding: 11px 10px 9px; }
   .tab-panel { padding: 10px 10px 12px; }
-  .log { height: 320px; }
-  .params-scroll { height: 340px; }
-  .results-scroll { height: 300px; }
 }
