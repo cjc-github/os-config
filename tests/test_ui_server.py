@@ -477,3 +477,22 @@ class FrontendTests(unittest.TestCase):
         css = (root / "style.css").read_text(encoding="utf-8")
         for token in [".tab-panel[hidden]", ".tab.is-active", ".tabbar"]:
             self.assertIn(token, css)
+
+    def test_main_tabs_and_header_plan(self):
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        for elem_id in ["tools-tab", "runs-tab", "panel-tools", "panel-runs"]:
+            self.assertIn(f'id="{elem_id}"', html)
+        header = html.split("</header>", 1)[0]
+        self.assertIn('id="plan-summary"', header)
+        self.assertIn('id="plan-btn"', header)
+        self.assertIn('id="run-btn"', header)
+        self.assertIn('id="status-btn"', header)
+        self.assertLess(header.index('id="plan-btn"'), header.index('id="status-btn"'))
+        self.assertNotIn('id="results"', header)
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["function setMainTab", "MAIN_TABS", 'setMainTab("runs")']:
+            self.assertIn(token, js)
+        css = (root / "style.css").read_text(encoding="utf-8")
+        for token in [".maintabs", ".maintab.is-active", ".plan-strip"]:
+            self.assertIn(token, css)

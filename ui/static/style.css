@@ -57,6 +57,7 @@ body {
 .topbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
@@ -64,6 +65,49 @@ body {
   border: 1px solid var(--border);
   border-top: 3px solid var(--accent);
   border-radius: var(--radius);
+}
+
+.planbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 420px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.planbar-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.plan-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 2px 0;
+  scrollbar-width: thin;
+}
+.plan-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.plan-chip.is-dep { border-color: var(--warn); }
+.plan-note {
+  max-width: 260px;
+  padding: 2px 9px;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  color: var(--warn);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .brand { display: flex; align-items: baseline; gap: 10px; }
@@ -88,7 +132,7 @@ body {
 
 .layout {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.2fr) minmax(260px, 0.9fr);
+  grid-template-columns: minmax(280px, 1fr) minmax(340px, 1.25fr);
   gap: 14px;
   align-items: start;
 }
@@ -96,6 +140,41 @@ body {
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; }
 }
+
+/* ---------- 主 tab：工具与参数 / 运行详情 ---------- */
+
+.maintabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.maintab {
+  padding: 11px 18px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.maintab:hover:not(:disabled) {
+  color: var(--text);
+  border-bottom-color: var(--border);
+}
+.maintab.is-active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.maintab:focus-visible { outline-offset: -3px; }
+
+.mainpanel[hidden] { display: none; }
 
 .panel {
   background: var(--panel);
@@ -157,15 +236,6 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 .tool-id { font-family: var(--mono); }
 .tool-desc { color: var(--muted); font-size: 12px; }
 
-.banner {
-  margin: 8px 0;
-  padding: 8px 10px;
-  border-radius: 7px;
-  border: 1px solid var(--accent);
-  background: var(--accent-soft);
-  font-size: 12px;
-}
-
 .params { display: flex; flex-direction: column; gap: 10px; }
 .param-group { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px 10px; margin: 0; }
 .param-group legend { padding: 0 6px; font-size: 12px; color: var(--muted); }
@@ -178,11 +248,8 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 .check-line.compact { font-size: 12px; color: var(--muted); }
 .check-line input { accent-color: var(--accent); }
 
-.plan-summary { display: flex; flex-direction: column; gap: 4px; min-height: 60px; }
-.plan-count { margin: 0 0 4px; color: var(--muted); font-size: 12px; }
-.plan-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--border); }
 .plan-id { font-family: var(--mono); }
-.plan-status { margin-left: auto; font-size: 12px; color: var(--muted); }
+.plan-status { font-size: 11px; color: var(--muted); }
 .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
 .tag-selected { color: var(--accent); border-color: var(--accent); }
 .tag-dep { color: var(--warn); border-color: var(--warn); }
@@ -373,7 +440,10 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 
 @media (max-width: 640px) {
   .brand .muted { display: none; }
+  .planbar-label { display: none; }
+  .plan-note { max-width: 150px; }
   .current-item { display: none; }
+  .maintab { padding: 10px 12px 8px; }
   .tab { padding: 11px 10px 9px; }
   .tab-panel { padding: 10px 10px 12px; }
   .log { height: 320px; }

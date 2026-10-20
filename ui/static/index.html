@@ -13,6 +13,13 @@
       <strong>os-config</strong>
       <span class="muted">本机开发环境配置</span>
     </div>
+    <div class="planbar">
+      <span class="planbar-label">执行计划</span>
+      <div id="plan-summary" class="plan-strip" aria-live="polite"></div>
+      <div id="dep-banner" class="plan-note" hidden></div>
+      <button id="plan-btn" type="button" class="ghost">预览计划</button>
+      <button id="run-btn" type="button" class="primary">开始执行</button>
+    </div>
     <div class="status">
       <span id="run-state" class="pill">空闲</span>
       <span id="sudo-badge" class="pill" title="sudo 预授权状态">检查中…</span>
@@ -20,118 +27,123 @@
     </div>
   </header>
 
-  <main class="layout">
-    <section class="panel tools-panel">
-      <div class="panel-head">
-        <h2>工具清单</h2>
-        <div class="head-actions">
-          <button id="select-all" type="button" class="ghost">全选</button>
-          <button id="select-none" type="button" class="ghost">清空</button>
+  <nav class="maintabs" role="tablist" aria-label="功能区">
+    <button id="tools-tab" class="maintab is-active" type="button" role="tab"
+            aria-selected="true" aria-controls="panel-tools" data-main-tab="tools">
+      工具与参数
+    </button>
+    <button id="runs-tab" class="maintab" type="button" role="tab"
+            aria-selected="false" aria-controls="panel-runs" data-main-tab="runs" tabindex="-1">
+      运行详情
+    </button>
+  </nav>
+
+  <section id="panel-tools" class="mainpanel" role="tabpanel" aria-labelledby="tools-tab">
+    <main class="layout">
+      <section class="panel tools-panel">
+        <div class="panel-head">
+          <h2>工具清单</h2>
+          <div class="head-actions">
+            <button id="select-all" type="button" class="ghost">全选</button>
+            <button id="select-none" type="button" class="ghost">清空</button>
+          </div>
         </div>
-      </div>
-      <div class="field">
-        <label for="preset">预设</label>
-        <select id="preset"></select>
-      </div>
-      <div class="field">
-        <label for="search">搜索</label>
-        <input id="search" type="search" placeholder="按名称或说明过滤" autocomplete="off">
-      </div>
-      <div id="dep-banner" class="banner" hidden></div>
-      <div id="tool-list" class="tool-list"></div>
-    </section>
+        <div class="field">
+          <label for="preset">预设</label>
+          <select id="preset"></select>
+        </div>
+        <div class="field">
+          <label for="search">搜索</label>
+          <input id="search" type="search" placeholder="按名称或说明过滤" autocomplete="off">
+        </div>
+        <div id="tool-list" class="tool-list"></div>
+        <details id="remove-section" class="remove">
+          <summary>卸载工具</summary>
+          <div id="remove-list" class="tool-list"></div>
+          <button id="remove-btn" type="button" class="danger">卸载所选</button>
+        </details>
+      </section>
 
-    <section class="panel params-panel">
-      <div class="panel-head"><h2>参数</h2></div>
-      <div id="params" class="params"></div>
-      <div class="options">
-        <label class="check-line">
-          <input id="keep-going" type="checkbox" checked>
-          <span>某项失败后继续执行其余项</span>
-        </label>
-        <p class="hint">关闭后：遇到失败立即回滚并停止。</p>
-        <label class="check-line">
-          <input id="verify-after" type="checkbox" checked>
-          <span>安装完成后执行校验</span>
-        </label>
-        <label class="check-line">
-          <input id="force" type="checkbox">
-          <span>强制重新执行（忽略已安装状态）</span>
-        </label>
-        <label class="check-line">
-          <input id="clear-secrets" type="checkbox">
-          <span>清除已保存的口令</span>
-        </label>
-      </div>
-    </section>
-
-    <section class="panel plan-panel">
-      <div class="panel-head"><h2>执行计划</h2></div>
-      <div id="plan-summary" class="plan-summary"></div>
-      <div class="actions">
-        <button id="plan-btn" type="button" class="ghost">预览计划</button>
-        <button id="run-btn" type="button" class="primary">开始执行</button>
-      </div>
-      <details id="remove-section" class="remove">
-        <summary>卸载工具</summary>
-        <div id="remove-list" class="tool-list"></div>
-        <button id="remove-btn" type="button" class="danger">卸载所选</button>
-      </details>
-    </section>
-  </main>
-
-  <section class="panel workspace">
-    <div class="tabbar" role="tablist" aria-label="运行详情">
-      <button id="results-tab" class="tab is-active" type="button" role="tab"
-              aria-selected="true" aria-controls="panel-results" data-tab="results">
-        结果 <span id="results-count" class="tab-count">0</span>
-      </button>
-      <button id="log-tab" class="tab" type="button" role="tab"
-              aria-selected="false" aria-controls="panel-log" data-tab="log" tabindex="-1">
-        实时日志 <span id="log-state" class="tab-live" hidden></span>
-      </button>
-      <button id="history-tab" class="tab" type="button" role="tab"
-              aria-selected="false" aria-controls="panel-history" data-tab="history" tabindex="-1">
-        历史
-      </button>
-      <span id="current-item" class="current-item" hidden></span>
-    </div>
-
-    <div id="panel-results" class="tab-panel" role="tabpanel" aria-labelledby="results-tab">
-      <div class="panel-head">
-        <span id="result-summary" class="hint">选择工具后，这里会显示每一项的执行结果。</span>
-        <span class="hint">点击失败行可在日志中定位</span>
-      </div>
-      <table class="results">
-        <thead>
-          <tr><th>工具</th><th>安装结果</th><th>校验结果</th></tr>
-        </thead>
-        <tbody id="results"></tbody>
-      </table>
-    </div>
-
-    <div id="panel-log" class="tab-panel" role="tabpanel" aria-labelledby="log-tab" hidden>
-      <div class="panel-head">
-        <span class="hint">引擎输出会实时写入这里，运行结束后仍可复制或下载。</span>
-        <div class="head-actions">
-          <label class="check-line compact">
-            <input id="autoscroll" type="checkbox" checked>
-            <span>自动滚动</span>
+      <section class="panel params-panel">
+        <div class="panel-head"><h2>参数</h2></div>
+        <div id="params" class="params"></div>
+        <div class="options">
+          <label class="check-line">
+            <input id="keep-going" type="checkbox" checked>
+            <span>某项失败后继续执行其余项</span>
           </label>
-          <button id="log-copy" type="button" class="ghost">复制</button>
-          <button id="log-download" type="button" class="ghost">下载</button>
+          <p class="hint">关闭后：遇到失败立即回滚并停止。</p>
+          <label class="check-line">
+            <input id="verify-after" type="checkbox" checked>
+            <span>安装完成后执行校验</span>
+          </label>
+          <label class="check-line">
+            <input id="force" type="checkbox">
+            <span>强制重新执行（忽略已安装状态）</span>
+          </label>
+          <label class="check-line">
+            <input id="clear-secrets" type="checkbox">
+            <span>清除已保存的口令</span>
+          </label>
         </div>
-      </div>
-      <pre id="log" class="log" tabindex="0"></pre>
-    </div>
+      </section>
+    </main>
+  </section>
 
-    <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="history-tab" hidden>
-      <div class="panel-head">
-        <span class="hint">点击一条运行记录可回看结果与日志，不会改变当前选择。</span>
-        <button id="history-refresh" type="button" class="ghost">刷新</button>
+  <section id="panel-runs" class="mainpanel" role="tabpanel" aria-labelledby="runs-tab" hidden>
+    <section class="panel workspace">
+      <div class="tabbar" role="tablist" aria-label="运行详情">
+        <button id="results-tab" class="tab is-active" type="button" role="tab"
+                aria-selected="true" aria-controls="panel-results" data-tab="results">
+          结果 <span id="results-count" class="tab-count">0</span>
+        </button>
+        <button id="log-tab" class="tab" type="button" role="tab"
+                aria-selected="false" aria-controls="panel-log" data-tab="log" tabindex="-1">
+          实时日志 <span id="log-state" class="tab-live" hidden></span>
+        </button>
+        <button id="history-tab" class="tab" type="button" role="tab"
+                aria-selected="false" aria-controls="panel-history" data-tab="history" tabindex="-1">
+          历史
+        </button>
+        <span id="current-item" class="current-item" hidden></span>
       </div>
-      <div id="history" class="history"></div>
-    </div>
+
+      <div id="panel-results" class="tab-panel" role="tabpanel" aria-labelledby="results-tab">
+        <div class="panel-head">
+          <span id="result-summary" class="hint">选择工具后，这里会显示每一项的执行结果。</span>
+          <span class="hint">点击失败行可在日志中定位</span>
+        </div>
+        <table class="results">
+          <thead>
+            <tr><th>工具</th><th>安装结果</th><th>校验结果</th></tr>
+          </thead>
+          <tbody id="results"></tbody>
+        </table>
+      </div>
+
+      <div id="panel-log" class="tab-panel" role="tabpanel" aria-labelledby="log-tab" hidden>
+        <div class="panel-head">
+          <span class="hint">引擎输出会实时写入这里，运行结束后仍可复制或下载。</span>
+          <div class="head-actions">
+            <label class="check-line compact">
+              <input id="autoscroll" type="checkbox" checked>
+              <span>自动滚动</span>
+            </label>
+            <button id="log-copy" type="button" class="ghost">复制</button>
+            <button id="log-download" type="button" class="ghost">下载</button>
+          </div>
+        </div>
+        <pre id="log" class="log" tabindex="0"></pre>
+      </div>
+
+      <div id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="history-tab" hidden>
+        <div class="panel-head">
+          <span class="hint">点击一条运行记录可回看结果与日志，不会改变当前选择。</span>
+          <button id="history-refresh" type="button" class="ghost">刷新</button>
+        </div>
+        <div id="history" class="history"></div>
+      </div>
+    </section>
   </section>
 </div>
 

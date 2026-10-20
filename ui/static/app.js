@@ -23,9 +23,11 @@ const S = {
   installed: [],
   catalogTools: [],
   rollingBack: false,
+  mainTab: "tools",
   tab: "results",
 };
 
+const MAIN_TABS = ["tools", "runs"];
 const TABS = ["results", "log", "history"];
 
 function $(id) {
@@ -34,6 +36,22 @@ function $(id) {
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function setMainTab(name) {
+  if (MAIN_TABS.indexOf(name) === -1) return;
+  S.mainTab = name;
+  MAIN_TABS.forEach((tab) => {
+    const button = $(tab + "-tab");
+    const panel = $("panel-" + tab);
+    const active = tab === name;
+    if (button) {
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+      button.tabIndex = active ? 0 : -1;
+    }
+    if (panel) panel.hidden = !active;
+  });
 }
 
 function setTab(name) {
@@ -255,31 +273,36 @@ function renderPlan(data) {
   clear(box);
   const banner = $("dep-banner");
   if (!data) {
-    box.appendChild(make("p", S.selection.size ? "计划生成失败" : "未选择任何工具", "hint"));
+    box.appendChild(make("span", S.selection.size ? "计划生成失败" : "未选择任何工具", "hint"));
     banner.hidden = true;
     return;
   }
   const items = data.items || [];
-  box.appendChild(make("p", "共 " + items.length + " 项", "plan-count"));
+  if (!items.length) {
+    box.appendChild(make("span", "未选择任何工具", "hint"));
+  }
   const deps = [];
   items.forEach((item) => {
-    const line = make("div", null, "plan-item");
-    line.appendChild(make("span", item.id, "plan-id"));
+    const dep = !item.selected && item.required_by && item.required_by.length;
+    const chip = make("span", null, "plan-chip" + (dep ? " is-dep" : ""));
+    chip.appendChild(make("span", item.id, "plan-id"));
     if (item.selected) {
-      line.appendChild(make("span", "主动选择", "tag tag-selected"));
-    } else if (item.required_by && item.required_by.length) {
+      chip.appendChild(make("span", "主动", "tag tag-selected"));
+    } else if (dep) {
       const by = item.required_by.join("、");
-      line.appendChild(make("span", "由 " + by + " 依赖引入", "tag tag-dep"));
+      chip.appendChild(make("span", "依赖", "tag tag-dep"));
+      chip.title = "由 " + by + " 依赖引入";
       deps.push(item.id + "（由 " + by + " 依赖引入）");
     }
-    line.appendChild(make("span", item.status || "", "plan-status status-" + (item.status || "planned")));
-    box.appendChild(line);
+    if (item.status && item.status !== "planned") {
+      chip.appendChild(make("span", item.status, "plan-status status-" + item.status));
+    }
+    box.appendChild(chip);
   });
   if (deps.length) {
     banner.hidden = false;
-    clear(banner);
-    banner.appendChild(make("strong", "已自动引入依赖："));
-    banner.appendChild(document.createTextNode(deps.join("；")));
+    banner.textContent = "依赖引入 " + deps.length + " 项：" + deps.join("；");
+    banner.title = banner.textContent;
   } else {
     banner.hidden = true;
   }
@@ -546,6 +569,7 @@ function highlightLog(id) {
     }
   });
   if (first) {
+    setMainTab("runs");
     setTab("log");
     if (!$("autoscroll").checked) first.scrollIntoView({ block: "center" });
     else $("log").scrollTop = first.offsetTop - 40;
@@ -567,6 +591,7 @@ function finishRun(event) {
   });
   renderResults();
   setRunning(false);
+  setMainTab("runs");
   setTab("results");
   if (S.eventSource) S.eventSource.close();
   S.eventSource = null;
@@ -651,6 +676,7 @@ async function checkStatus() {
       S.results.set(item.id, entry);
     });
     renderResults();
+    setMainTab("runs");
     setTab("results");
     clearLog();
     (data.logs || []).forEach((line) => appendLog(line));
@@ -689,6 +715,7 @@ async function startRun(verb) {
     const data = await api("POST", "/api/run", body);
     S.activeRunId = data.run_id;
     setRunning(true);
+    setMainTab("runs");
     setTab("log");
     connectEvents(S.activeRunId);
     toast("已开始执行：" + data.run_id, "ok");
@@ -818,6 +845,7 @@ async function loadHistory(runId) {
       if (line) appendLog(line);
     });
     $("log").scrollTop = 0;
+    setMainTab("runs");
     setTab("results");
     toast("已载入历史：" + runId);
   } catch (err) {
@@ -873,7 +901,11 @@ async function bootstrap() {
     refreshInstalled();
     refreshHistory();
     schedulePlan(0);
-    if (st.running) connectEvents(st.current && st.current.run_id);
+    if (st.running) {
+      setMainTab("runs");
+      setTab("log");
+      connectEvents(st.current && st.current.run_id);
+    }
   } catch (err) {
     setRunning(false);
   }
@@ -919,6 +951,22 @@ function wireEvents() {
   $("remove-btn").addEventListener("click", openRemoveModal);
   $("confirm-cancel").addEventListener("click", () => {
     $("confirm-modal").hidden = true;
+  });
+  MAIN_TABS.forEach((name) => {
+    const button = $(name + "-tab");
+    button.addEventListener("click", () => setMainTab(name));
+    button.addEventListener("keydown", (ev) => {
+      let next = null;
+      const index = MAIN_TABS.indexOf(S.mainTab);
+      if (ev.key === "ArrowRight") next = (index + 1) % MAIN_TABS.length;
+      else if (ev.key === "ArrowLeft") next = (index - 1 + MAIN_TABS.length) % MAIN_TABS.length;
+      else if (ev.key === "Home") next = 0;
+      else if (ev.key === "End") next = MAIN_TABS.length - 1;
+      if (next === null) return;
+      ev.preventDefault();
+      setMainTab(MAIN_TABS[next]);
+      $(MAIN_TABS[next] + "-tab").focus();
+    });
   });
   TABS.forEach((name) => {
     const button = $(name + "-tab");
