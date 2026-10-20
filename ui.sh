@@ -120,10 +120,6 @@ if [[ -z "$TOKEN" ]]; then
   exit 1
 fi
 
-PYTHONPATH="$ROOT" OS_CONFIG_UI_TOKEN="$TOKEN" \
-  python3 -m ui.server --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
-SERVER_PID=$!
-
 port_ready() {
   python3 -c 'import socket,sys
 s=socket.socket(); s.settimeout(0.3)
@@ -134,6 +130,17 @@ except OSError:
 finally:
     s.close()' "$PORT"
 }
+
+# 端口已被占用时直接失败：否则就绪探测会连上别的服务，
+# 打印一个带新 token 的地址，而实际服务仍是旧进程（表现为 unauthorized）。
+if port_ready >/dev/null 2>&1; then
+  printf '错误: 端口 %s 已被占用，请关闭占用该端口的进程或改用 --port 指定其他端口\n' "$PORT" >&2
+  exit 1
+fi
+
+PYTHONPATH="$ROOT" OS_CONFIG_UI_TOKEN="$TOKEN" \
+  python3 -m ui.server --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
+SERVER_PID=$!
 
 ready=0
 for _ in $(seq 1 100); do

@@ -1220,6 +1220,24 @@ test_ui_launcher() {
   assert_rc_eq 2 "$rc" "非本机 host 返回 2"
   bash "$ROOT/ui.sh" --nope </dev/null >/dev/null 2>&1; rc=$?
   assert_rc_eq 2 "$rc" "未知参数返回 2"
+  # 端口已被占用时必须直接失败，不能连到别人的服务还打印成功地址。
+  local port holder
+  port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+  python3 - "$port" <<'PY' &
+import socket, sys, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(1)
+time.sleep(30)
+PY
+  holder=$!
+  sleep 0.3
+  out=$(timeout 3 bash "$ROOT/ui.sh" --no-open --port "$port" </dev/null 2>&1); rc=$?
+  kill "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null
+  assert_rc_eq 1 "$rc" "端口占用返回 1"
+  assert_contains "$out" "已被占用" "端口占用提示"
 }
 
 test_ui_ignores_and_docs() {
