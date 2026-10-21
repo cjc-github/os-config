@@ -168,7 +168,7 @@ _engine_state_sync() {
 # ---------------------------------------------------------------------------
 # 单工具分派
 # ---------------------------------------------------------------------------
-engine_run_one() {
+_engine_dispatch_verb() {
   local verb="$1" id="$2"
 
   if [[ "${NO_SUDO:-0}" == 1 ]] && _engine_needs_sudo "$id"; then
@@ -190,6 +190,39 @@ engine_run_one() {
   averb="$(_engine_action_verb "$verb")" || { log_error "[$id] 未知动词：$verb"; return 2; }
   action_dispatch "$averb" "$id" || return $?
   _engine_state_sync "$verb" "$id"
+}
+
+# 校验一项；--fix 时校验未通过会先 apply 再复验。
+# 修完仍不过才判失败，避免"修了但没修好"被算成成功。
+_engine_verify_or_fix() {
+  local id="$1" rc
+  _engine_dispatch_verb verify "$id"
+  rc=$?
+  (( rc == 0 || rc == 100 )) && return "$rc"
+
+  if [[ "${FIX:-0}" != 1 || "${DRY_RUN:-0}" == 1 ]]; then
+    return "$rc"
+  fi
+  log_warn "[$id] 校验未通过（rc=$rc），执行 apply 修复"
+  _engine_dispatch_verb install "$id" || {
+    log_error "[$id] 修复失败"
+    return 1
+  }
+  _engine_dispatch_verb verify "$id" || {
+    log_error "[$id] 修复后复验仍未通过"
+    return 1
+  }
+  log_ok "[$id] 已修复并通过复验"
+  return 0
+}
+
+engine_run_one() {
+  local verb="$1" id="$2"
+  if [[ "$verb" == verify && "${FIX:-0}" == 1 ]]; then
+    _engine_verify_or_fix "$id"
+    return $?
+  fi
+  _engine_dispatch_verb "$verb" "$id"
 }
 
 # ---------------------------------------------------------------------------

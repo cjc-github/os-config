@@ -1,16 +1,16 @@
 # os-config 项目设计
 
-> 状态：v7（2026-09-20）。架构从“平台 + 模块三件套”重构为“声明式 catalog + 无状态引擎 + 五动词”。
+> 状态：v7.1（2026-10-21）。架构从“平台 + 模块三件套”重构为“声明式 catalog + 无状态引擎 + 七动词”。
 > 当前实现 Ubuntu 22.04/24.04 的 Bash 引擎；Windows PowerShell 引擎待实现。本文以仓库现有代码为准。
 
 ## 一、目标和边界
 
 `os-config` 用一个入口完成开发环境的安装与配置：
 
-1. 选定一份**清单**（profile，或 `--pick` / `--all`）。
+1. 选定一份**清单**（profile，或 `--pick` / `--all`；`export`/`doctor` 不需要选择）。
 2. 展开**依赖闭包**并拓扑排序。
 3. 对每一项分派到**后端适配器**（package）或**配置动作**（config）。
-4. 执行五动词之一：`install` / `update` / `remove` / `verify` / `status`。
+4. 执行七动词之一：`install` / `update` / `remove` / `verify` / `status` / `export` / `doctor`。
 5. 汇总成功、跳过、失败，并在失败时回滚本次写操作。
 
 设计目标：新增一个工具**只改数据**（`catalog/*.catalog`）或**只加一个动作脚本**，不需要动引擎。
@@ -22,34 +22,42 @@
 | 平台 | `platforms/<族>/` 目录 + `detect.sh` | 单引擎，架构差异下沉到后端/动作内部 |
 | 工具描述 | 每模块 `module.conf` + `install.sh` + `verify.sh` | `catalog/*.catalog` 数据文件 |
 | 选择 | `config/base-tools.conf` + `--module` | `profiles/*.conf` + `--pick`/`--all` |
-| 动词 | `install` / `verify` 两种 | `install`/`update`/`remove`/`verify`/`status` 五种 |
+| 动词 | `install` / `verify` 两种 | `install`/`update`/`remove`/`verify`/`status`/`export`/`doctor` 七种 |
 | 后端 | 各模块自己写 apt/npm 命令 | 统一适配器 `apt`/`npm`/`snap` |
-| 状态 | 一次性 `.backups` manifest | `state/manifest.conf` + 每动作持久备份 |
+| 状态 | 一次性 `.backups` manifest | `state/manifest.conf` + 每动作持久备份 + `.lock` 并发锁 |
 
 ## 二、目录结构
 
 ```text
-setup.sh                    入口：解析动词与选择 → engine_run
+setup.sh                    入口：解析动词与选择 → engine_run / doctor_run / export_run
+ui.sh                       Web UI 启动器（本机回环 + 一次性 token）
+ui/                         Web UI 服务（Python 标准库）与静态资源
 catalog/
   base.catalog              系统与工具类的 package/config 条目
   config.catalog            配置类条目
 profiles/
-  minimal.conf  default.conf  dev.conf  ai.conf
+  minimal.conf  default.conf  dev.conf  ai.conf     # 仓库自带
+  exported.conf             export 动词的默认产物（gitignore）
 engine/
   lib/log.sh                终端+文件日志、脱敏、权限
   lib/util.sh               配置加载、run_step、重试、sudo、apt 锁、代理推导、nvm
   lib/rollback.sh           备份/回滚/trap/临时文件
-  lib/state.sh              manifest 与 state/actions/<name>/
+  lib/state.sh              manifest、state/actions/<name>/、并发锁 .lock
   lib/catalog.sh            catalog 解析、校验、变量/artifacts 展开、内联注册
   lib/profile.sh            profile 解析、继承、tokens 解析、resolve
   lib/graph.sh              依赖闭包、拓扑排序、逆序、dependents
   lib/backends.sh           apt / npm / snap 适配器
-  lib/engine.sh             五动词编排器
+  lib/engine.sh             七动词编排器（含 verify --fix）
+  lib/doctor.sh             doctor 动词：环境体检
+  lib/export.sh             export 动词：扫描本机状态导出 profile
+  lib/events.sh             结构化事件（JSONL，供 Web UI 实时日志）
+  lib/list_json.sh          catalog/profile 的 JSON 序列化
   actions/
     mirrors.sh proxy.sh git.sh ssh.sh syslog.sh nosuspend.sh nodejs.sh
 state/
   manifest.conf             已记录工具的产物清单
   actions/<name>/           跨运行的持久备份（如 mirrors 的原源文件）
+  .lock                     写运行独占锁（pid 文件）
 tests/run.sh                回归测试
 docs/DESIGN.md              本文
 ```
@@ -164,13 +172,15 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 
 ### 动词到动作的映射
 
-| 动词 | package 类 | config 类 |
-|---|---|---|
-| install | `_backend_<b>_install` | `action_<action>_apply` |
-| update | `_backend_<b>_update` | `action_<action>_apply` |
-| remove | `_backend_<b>_remove` | `action_<action>_remove` |
-| verify | `_backend_<b>_verify` | `action_<action>_verify` |
-| status | `_backend_<b>_status` | `action_<action>_status`（7 个动作都已实现；缺失时才回退通用输出） |
+| 动词 | package 类 | config 类 | 需要选择 |
+|---|---|---|---|
+| install | `_backend_<b>_install` | `action_<action>_apply` | 是 |
+| update | `_backend_<b>_update` | `action_<action>_apply` | 是 |
+| remove | `_backend_<b>_remove` | `action_<action>_remove` | 是 |
+| verify | `_backend_<b>_verify` | `action_<action>_verify` | 是（`--fix` 时为写） |
+| status | `_backend_<b>_status` | `action_<action>_status`（7 个动作都已实现；缺失时才回退通用输出） | 是 |
+| export | 扫描 catalog 中实际已安装的条目，写成 profile | — | 否 |
+| doctor | 环境体检（`engine/lib/doctor.sh`），不走 catalog 分派 | — | 否 |
 
 动作脚本在首次使用时才 source（`_engine_source_action`），同一动作只加载一次。
 
@@ -183,6 +193,10 @@ engine_run <verb> <id...>
   ├─ 逐项 engine_run_one
   │    ├─ --no-sudo 且需提权 → 返回 100（skipped）
   │    ├─ --dry-run 且是写动词 → 只打印
+  │    ├─ verify 且 --fix → _engine_verify_or_fix
+  │    │     ├─ 先 verify；通过/skipped 直接返回
+  │    │     ├─ 未通过 → dispatch install（apply）→ 再 verify
+  │    │     └─ 复验仍不过才判失败
   │    ├─ package → backend_dispatch
   │    └─ config  → action_dispatch + _engine_state_sync
   └─ 汇总：成功 / 跳过 / 失败；失败则返回 1
@@ -191,6 +205,7 @@ engine_run <verb> <id...>
 - 非 `--keep-going` 时首个失败即中断（由 trap 触发整体回滚）。
 - `--keep-going` 时继续跑完，最终仍返回非零；引擎本身不触发回滚。
 - 动作可以用返回码 `100` 表示「skipped」（例如 `nodejs` 卸载时用户拒绝、`syslog` 卸载时没有 sudo 权限），引擎会把它计入「跳过」而不是「成功」或「失败」。
+- `--fix` 与 `--dry-run` 同时给出时不修复（dry-run 优先），setup.sh 会给出提示。
 
 ### remove 的依赖提示
 
@@ -201,15 +216,17 @@ engine_run <verb> <id...>
 
 ### Web UI 的动词映射
 
-Web UI 走的是同一套引擎命令（`setup.sh <动词> --pick ...`），五个动词全部可达：
+Web UI 走的是同一套引擎命令（`setup.sh <动词> --pick ...`），五个**与选择相关**的动词全部可达：
 
 | UI | 命令 | 说明 |
 |---|---|---|
 | 安装 | `install` | 默认动词 |
 | 更新 | `update` | package 升到候选版本，config 重新 apply |
 | 卸载 | `remove` | 必须带确认，服务端拒绝没有 `confirm` 的请求 |
-| 校验 | `verify` | 只读 |
+| 校验 | `verify` | 只读（UI 不提供 `--fix`） |
 | 状态 | `status` | 只读，输出各工具当前状态 |
+
+`export` 与 `doctor` 不需要选择，目前只在命令行提供（UI 的整个交互围绕选择展开，接入需要单独设计）。
 
 「预览计划」走 `--dry-run`。引擎只对写动词（install/update/remove）做 dry-run 短路，只读动词会真的执行，因此预览接口统一用写动词生成计划，避免在预览时触发 `curl -x` 之类的副作用。
 
@@ -217,6 +234,7 @@ Web UI 走的是同一套引擎命令（`setup.sh <动词> --pick ...`），五�
 
 - `_engine_needs_sudo`：package 类的 `apt`/`snap` 视为需要提权；config 类看 `sudo=1`。
 - `_engine_is_write_verb`：`install`/`update`/`remove` 是写动词。
+- setup.sh 的 `_needs_write_lock`：`install`/`update`/`remove`，以及 `verify --fix`（非 dry-run）需要写锁。
 
 ## 七、后端适配器
 
@@ -240,7 +258,21 @@ state_has <id> / state_artifacts <id>
 
 每次写运行开始 `state_snapshot` 把 `manifest.conf` 存到 `.manifest.run.bak`；成功或 `--keep-going` 时 `state_discard_snapshot` 丢弃，失败回滚时 `state_restore_snapshot` 还原，保证文件改动与清单改动一起回退（否则 status/remove 会依据残留清单去找已回滚的产物）。
 
-只有 `install/update/remove` 且非 `--dry-run` 的入口会取快照。`verify`、`status` 与 dry-run 不写清单，也不得丢弃或还原快照——否则它们会删掉并发写运行正在使用的回滚基线。`state.sh` 用 `STATE_SNAPSHOT_OWNER` 标记所有权，只有取过快照的运行才能还原/丢弃它。
+只有 `install/update/remove` 且非 `--dry-run` 的入口会取快照；`verify --fix` 同样会写清单，也取快照。`verify`（无 `--fix`）、`status` 与 dry-run 不写清单，也不得丢弃或还原快照——否则它们会删掉并发写运行正在使用的回滚基线。`state.sh` 用 `STATE_SNAPSHOT_OWNER` 标记所有权，只有取过快照的运行才能还原/丢弃它。
+
+### 并发锁
+
+快照基线只有一个（`.manifest.run.bak`），两个写运行同时跑会互相覆盖。因此写运行还要取 `state/.lock`：
+
+```text
+state_lock_acquire    mkdir 原子取锁，写入 pid；已有锁时
+                      ├─ pid 已死 → 清理残留后重试
+                      └─ pid 存活 → 报错退出，提示删除锁路径
+state_lock_release    只释放自己持有的锁（比对 pid），不误删他人锁
+state_locked          当前是否持有锁（供 EXIT trap 判断）
+```
+
+只读动词（`verify` 无 `--fix`、`status`、`export`、`doctor`）与 `--dry-run` 不取锁，因此可以与写运行并行。EXIT trap 无条件调用 `state_lock_release`，由它自己判断是否持有。
 
 `state_action_dir <name>` 返回 `state/actions/<name>/`（模式 700），供动作做**跨运行**的持久记录，与一次性回滚不同。典型用例是 `mirrors`：`state/actions/mirrors/changed.txt` + 原文件备份，使 `remove mirrors` 能在任意后续运行中还原到“本动作首次改写前”的状态。
 
@@ -320,14 +352,59 @@ SSH 服务端不再由布尔开关控制：`openssh-server` 是 catalog 里的�
 
 - 每个用例在 `( ... )` 子 shell 中运行，`HOME`/`STATE_DIR`/`STATE_FILE`/`LOG_FILE`/`PATH` 全部指向临时目录。
 - `sudo`/`fuser`/`ip`/`ping`/`apt-get`/`dpkg-query`/`dpkg`/`npm`/`node`/`snap`/`ssh-keygen`/`curl` 均为 fake，不会改动宿主机。
-- 覆盖：语法、真实 catalog 加载与关键字段、变量/artifacts 展开（含 `${VAR:-默认值}`、desc 不展开、artifacts 只展开一次）、非法输入拒绝、adhoc 幂等、profile 解析与继承、依赖闭包/逆序、state 权限、rollback 六种路径（含 sudo 不可用不删文件、备份失败可重试）、util/IPv4/sudo、`with_retry`、代理推导、日志脱敏、semver/命令校验/后端分派、apt/npm/snap 五动词、引擎（install/update/remove/verify/status/dry-run/no-sudo/失败/keep-going/status 回退/缺动作/未知动词、remove 时提示选集外的已安装依赖方）、动作脚本接口完整性（apply/remove/verify/status 四动词齐备）、mirrors/nodejs/nosuspend/ssh 辅助函数、proxy 写入/幂等/重写/移除、nodejs 卸载被拒绝算 skipped 与卸载还原 npm 配置、nosuspend 按原值还原、syslog 无 sudo 仍清用户级残留与 verify 查 bat 软链、内联 id 去首尾短横、废弃配置键有提示、`setup.sh` 入口参数。
+- 覆盖：语法、真实 catalog 加载与关键字段、变量/artifacts 展开（含 `${VAR:-默认值}`、desc 不展开、artifacts 只展开一次）、非法输入拒绝、adhoc 幂等、profile 解析与继承、依赖闭包/逆序、state 权限与并发锁（取放/不误删他人锁/清理残留）、rollback 六种路径（含 sudo 不可用不删文件、备份失败可重试）、util/IPv4/sudo、`with_retry`、代理推导、日志脱敏、semver/命令校验/后端分派、apt/npm/snap 五动词、引擎（install/update/remove/verify/status/dry-run/no-sudo/失败/keep-going/status 回退/缺动作/未知动词、remove 时提示选集外的已安装依赖方、verify --fix 修复后复验与 dry-run 不修复）、动作脚本接口完整性（apply/remove/verify/status 四动词齐备）、mirrors/nodejs/nosuspend/ssh 辅助函数、proxy 写入/幂等/重写/移除、nodejs 卸载被拒绝算 skipped 与卸载还原 npm 配置、nosuspend 按原值还原、syslog 无 sudo 仍清用户级残留与 verify 查 bat 软链、export（生成/空状态/文件名即 profile 名）、doctor（跑完全部检查/提示清单产物缺失）、`--fix` 与 `--output` 的参数组合校验、内联 id 去首尾短横、废弃配置键有提示、`setup.sh` 入口参数。
 
-## 十五、扩展
+## 十五、export 与 doctor
+
+### export —— 把本机状态导出为 profile
+
+`engine/lib/export.sh`，动词 `export`，不需要选择，只读（唯一写的是输出的 profile 文件）。
+
+```text
+export_run
+  ├─ 遍历 CAT_ORDER：
+  │    ├─ type=config → state_has <id>（清单里有即视为已应用）
+  │    └─ type=package → _engine_tool_installed <id>（问后端）
+  ├─ 全空 → 提示先 install 或用 --pick，返回 1
+  └─ 按 catalog 原始顺序写 <EXPORT_OUTPUT>：
+       ├─ 头注释：生成时间、用法、参数提示
+       ├─ [名] desc / extends= / tools=…（名取自输出文件名）
+       └─ 尾注释：21 个生效参数的当前值（空值标为 <未设置，走默认值>）
+```
+
+- 默认输出 `profiles/exported.conf`（已 gitignore，因机器而异）；`--output <路径>` 可改名，profile 名取自文件名。
+- 只导出工具选择，**不导出参数**——参数属于 `config/user.env`，写在注释里供人工核对，避免把代理、邮箱这类本机信息固化进可提交文件。
+- 新机器复刻：`install --profile exported` → `verify --fix --profile exported` 兜底收敛。
+
+### doctor —— 环境体检
+
+`engine/lib/doctor.sh`，动词 `doctor`，不需要选择，纯只读，不走 catalog 分派（`setup.sh` 在选择解析之前直接调用 `doctor_run`）。
+
+十项检查，每项结论为 通过 / 需关注（warn，不影响退出码）/ 未通过（fail）：
+
+| 检查 | 判定 |
+|---|---|
+| catalog | 条目数为 0 → fail |
+| profiles | 为空 → warn（只能用 --pick/--all） |
+| sudo | `sudo -n true` 通过 → ok；sudo 存在但免密不可用 → warn；无 sudo → fail |
+| disk | 根分区剩余 <512MB → fail；<2GB → warn |
+| apt-lock | `fuser` 能占到 dpkg 锁 → fail |
+| commands | 缺 curl/git → warn |
+| mirror | `curl -fsSI` 访问 `MIRROR_APT_URL`（默认 TUNA）失败 → warn |
+| proxy | `PROXY_ENABLED=true` 时 ping 代理主机 + `curl -x` 真实访问；任一失败 → warn |
+| manifest | 清单记录的产物路径消失 → warn，提示用 `verify --fix` |
+| state | `state/` 权限不是 700 → warn |
+
+有 fail 则 `doctor_run` 返回 1（setup.sh 退出码 1），全 ok/warn 返回 0。网络检查都带超时（5s 连接 / 10s 整体），不会长时间卡住。
+
+## 十六、扩展
 
 **加一个软件**：在 `catalog/*.catalog` 加一个 `[id]` 条目（package），必要时把它加入某个 profile 的 `tools`。
 
-**加一个配置**：写 `engine/actions/<name>.sh`，实现三个动词函数，然后在 catalog 里加 `type=config` 条目并声明 `artifacts`。
+**加一个配置**：写 `engine/actions/<name>.sh`，实现四个动词函数（apply/remove/verify/status），然后在 catalog 里加 `type=config` 条目并声明 `artifacts`。
 
 **加一个后端**：实现 `_backend_<name>_<verb>` 五个函数，登记 `BACKEND_SUPPORTED`，并在 `catalog_validate` 的允许列表中同步。
+
+**加一项体检**：在 `engine/lib/doctor.sh` 里写 `_doctor_<check>` 函数（0=ok / 1=fail / 2=warn），在 `doctor_run` 里用 `_doctor_check` 登记一行。
 
 **加一个平台**：实现对应引擎（Windows 为 `setup.ps1` + `engine/lib-win/`），复用同一套 catalog 与 profile 数据；平台差异只体现在后端与动作实现中。

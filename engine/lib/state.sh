@@ -113,3 +113,44 @@ state_has() {
   [[ -f "$STATE_FILE" ]] || return 1
   grep -q "^${tool}|" "$STATE_FILE"
 }
+
+# ---------------------------------------------------------------------------
+# 并发锁：写操作（install/update/remove/verify --fix）独占 state/
+# ---------------------------------------------------------------------------
+STATE_LOCK="${STATE_LOCK:-$STATE_DIR/.lock}"
+
+# state_lock_acquire —— 取得写锁。用 mkdir 保证原子性（POSIX 约定）。
+# 残留锁（持有者已退出）会被清理后重试；清理失败则报错退出。
+state_lock_acquire() {
+  local pid
+  state_init || return 1
+  if mkdir -- "$STATE_LOCK" 2>/dev/null; then
+    printf '%s\n' "$$" >"$STATE_LOCK/pid" 2>/dev/null || true
+    return 0
+  fi
+  pid="$(cat -- "$STATE_LOCK/pid" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+    log_warn "发现残留写锁（pid $pid 已不存在），清理后重试"
+    rm -rf -- "$STATE_LOCK" 2>/dev/null || true
+    if mkdir -- "$STATE_LOCK" 2>/dev/null; then
+      printf '%s\n' "$$" >"$STATE_LOCK/pid" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  local who="状态未知"
+  [[ -n "$pid" ]] && who="pid $pid"
+  log_error "另一个 setup.sh 正在写入（$who），已中止；"
+  log_error "若确认没有其他运行，删除 $STATE_LOCK 后重试"
+  return 1
+}
+
+# state_locked —— 当前是否持有写锁（供 trap 判断）
+state_locked() {
+  [[ -d "$STATE_LOCK" ]] && [[ "$(cat -- "$STATE_LOCK/pid" 2>/dev/null || true)" == "$$" ]]
+}
+
+# state_lock_release —— 释放写锁。只释放自己持有的，避免误删他人锁。
+state_lock_release() {
+  state_locked || return 0
+  rm -rf -- "$STATE_LOCK" 2>/dev/null || true
+}

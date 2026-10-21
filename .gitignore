@@ -25,6 +25,9 @@ config/ui.env
 config/*.local.env
 *.local.env
 
+# export 动词的默认产物（反映本机安装状态，因机器而异）
+profiles/exported.conf
+
 # Web UI 运行时（ui.sh 写入 state/ui/server.log 与每次运行记录）
 state/ui/
 

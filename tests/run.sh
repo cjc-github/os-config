@@ -17,6 +17,14 @@ FAIL=0
 FILTER="${1:-}"
 MATCHED=0
 
+# profiles/exported.conf 是 export 动词的默认产物（已 gitignore），不属于仓库
+# 自带的 profile 集合。断言集合/数量的用例会被它干扰，整轮运行前临时挪开。
+_HIDDEN_EXPORTED="$ROOT/profiles/exported.conf.testhide"
+if [[ -f "$ROOT/profiles/exported.conf" ]]; then
+  mv -f -- "$ROOT/profiles/exported.conf" "$_HIDDEN_EXPORTED"
+fi
+trap '[[ -f "$_HIDDEN_EXPORTED" ]] && mv -f -- "$_HIDDEN_EXPORTED" "$ROOT/profiles/exported.conf"' EXIT
+
 # ---------------------------------------------------------------------------
 # 断言：每个断言记一行 PASS/FAIL 到 $TMPROOT/.results
 # ---------------------------------------------------------------------------
@@ -129,6 +137,8 @@ load_libs() {
   . "$ROOT/engine/lib/backends.sh"
   . "$ROOT/engine/lib/events.sh"
   . "$ROOT/engine/lib/engine.sh"
+  . "$ROOT/engine/lib/doctor.sh"
+  . "$ROOT/engine/lib/export.sh"
 }
 
 make_fakes() {
@@ -2402,6 +2412,204 @@ test_ui_node_suite() {
 }
 
 # ===========================================================================
+# 14. 并发锁 / verify --fix / export / doctor
+# ===========================================================================
+test_state_lock_acquire_release() {
+  state_lock_acquire
+  assert_true "取锁成功" state_locked
+  assert_file_exists "$STATE_LOCK/pid" "锁里写了 pid"
+  assert_eq "$$" "$(cat "$STATE_LOCK/pid")" "pid 是自己"
+  state_lock_release
+  assert_true "锁已释放" test ! -d "$STATE_LOCK"
+}
+
+test_state_lock_ignores_other_holder() {
+  # 用存活的后台进程模拟另一个运行的 pid
+  sleep 30 & local other=$!
+  mkdir -p -- "$STATE_LOCK"
+  printf '%s\n' "$other" >"$STATE_LOCK/pid"
+  state_lock_release
+  assert_true "别人的锁不会被误删" test -d "$STATE_LOCK"
+  rm -rf -- "$STATE_LOCK"
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+}
+
+test_state_lock_cleans_stale() {
+  mkdir -p -- "$STATE_LOCK"
+  printf '999999\n' >"$STATE_LOCK/pid"   # 必然已死
+  state_lock_acquire
+  assert_true "残留锁被清理并重新取到" state_locked
+  state_lock_release
+}
+
+test_state_lock_acquire_blocked_message() {
+  sleep 30 & local other=$!
+  mkdir -p -- "$STATE_LOCK"
+  printf '%s\n' "$other" >"$STATE_LOCK/pid"
+  local out rc
+  out=$(state_lock_acquire 2>&1); rc=$?
+  assert_rc_eq 1 "$rc" "存活持有者时取锁失败"
+  assert_contains "$out" "pid $other" "错误里给出对方 pid"
+  assert_not_contains "$out" "pid $other$other" "pid 不应被重复拼接"
+  rm -rf -- "$STATE_LOCK"
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+}
+
+test_engine_verify_without_fix_fails() {
+  catalog_reset
+  register_config_tool testfake testfake
+  _ACTION_SOURCED[testfake]=1
+  local marker="$TESTDIR/marker"
+  action_testfake_apply()  { printf 'applied\n'  >>"$marker"; }
+  action_testfake_remove() { :; }
+  action_testfake_verify() { printf 'drift\n' >>"$marker"; return 1; }
+  FIX=0
+  local rc out
+  out=$(engine_run verify testfake 2>&1); rc=$?
+  assert_rc_eq 1 "$rc" "verify 失败返回 1"
+  assert_not_contains "$out" "执行 apply 修复" "未加 --fix 不该修复"
+  assert_not_contains "$(cat "$marker" 2>/dev/null || true)" applied "apply 未被调用"
+}
+
+test_engine_verify_fix_converges() {
+  catalog_reset
+  register_config_tool testfake testfake
+  _ACTION_SOURCED[testfake]=1
+  local marker="$TESTDIR/marker"
+  : >"$marker"
+  # 第一次 verify 失败；apply 之后 verify 才通过
+  action_testfake_apply()  { printf 'applied\n' >>"$marker"; }
+  action_testfake_remove() { :; }
+  action_testfake_verify() {
+    if grep -q applied "$marker"; then return 0; fi
+    printf 'drift\n' >>"$marker"
+    return 1
+  }
+  FIX=1
+  local rc out
+  out=$(engine_run verify testfake 2>&1); rc=$?
+  FIX=0
+  assert_rc_eq 0 "$rc" "verify --fix 成功返回 0"
+  assert_contains "$out" "执行 apply 修复" "打印了修复动作"
+  assert_contains "$out" "已修复并通过复验" "打印了复验通过"
+  assert_contains "$(cat "$marker")" applied "apply 被调用过"
+  assert_true "修复后落清单" state_has testfake
+}
+
+test_engine_verify_fix_dry_run_noop() {
+  catalog_reset
+  register_config_tool testfake testfake
+  _ACTION_SOURCED[testfake]=1
+  local marker="$TESTDIR/marker"
+  action_testfake_apply()  { printf 'applied\n' >>"$marker"; }
+  action_testfake_remove() { :; }
+  action_testfake_verify() { return 1; }
+  FIX=1 DRY_RUN=1
+  local rc
+  engine_run verify testfake >/dev/null 2>&1; rc=$?
+  FIX=0 DRY_RUN=0
+  assert_ne 0 "$rc" "dry-run 下不修复，仍报失败"
+  assert_file_missing "$marker" "dry-run 不触发 apply"
+}
+
+test_export_writes_profile() {
+  catalog_reset
+  register_pkg_tool pkg-a apt "a"
+  register_pkg_tool pkg-b apt "b"
+  register_config_tool cfg-a cfga
+  printf 'a\n' >"$TESTDIR/apt-installed"
+  state_record cfg-a cfga ~/.cfg-a
+  EXPORT_OUTPUT="$TESTDIR/out.conf"
+  local out rc
+  out=$(export_run 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "export 返回 0"
+  assert_contains "$out" "已导出" "提示已导出"
+  assert_file_exists "$TESTDIR/out.conf" "生成了 profile 文件"
+  local body
+  body="$(cat "$TESTDIR/out.conf")"
+  assert_contains "$body" "pkg-a" "包含已安装的包"
+  assert_contains "$body" "cfg-a" "包含已应用的配置"
+  assert_not_contains "$body" "pkg-b" "不含未安装的包"
+  assert_contains "$body" "[out]" "profile 名来自文件名"
+}
+
+test_export_empty_state_fails() {
+  catalog_reset
+  register_pkg_tool pkg-a apt "a"
+  EXPORT_OUTPUT="$TESTDIR/none.conf"
+  local out rc
+  out=$(export_run 2>&1); rc=$?
+  assert_rc_eq 1 "$rc" "空状态返回 1"
+  assert_not_contains "$out" "已导出" "不应生成文件"
+}
+
+test_export_profile_name_from_path() {
+  catalog_reset
+  register_pkg_tool pkg-a apt "a"
+  printf 'a\n' >"$TESTDIR/apt-installed"
+  EXPORT_OUTPUT="$TESTDIR/profiles/gen.conf"
+  mkdir -p -- "$TESTDIR/profiles"
+  export_run >/dev/null 2>&1
+  assert_file_exists "$TESTDIR/profiles/gen.conf" "按 --output 路径生成"
+  assert_contains "$(cat "$TESTDIR/profiles/gen.conf")" "[gen]" "profile 名取自文件名"
+}
+
+test_doctor_runs_all_checks() {
+  catalog_reset
+  register_pkg_tool pkg-a apt "a"
+  local out rc
+  out=$(doctor_run 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "doctor 返回 0"
+  assert_contains "$out" "catalog：通过" "检查了 catalog"
+  assert_contains "$out" "sudo：通过" "检查了 sudo（假命令可用）"
+  assert_contains "$out" "磁盘剩余" "检查了磁盘"
+  assert_contains "$out" "apt-lock：通过" "检查了 apt 锁"
+  assert_contains "$out" "doctor 汇总" "有汇总"
+}
+
+test_doctor_manifest_missing_artifact_warns() {
+  catalog_reset
+  register_config_tool cfg-a cfga
+  state_record cfga cfga "$TESTDIR/definitely-not-here"
+  local out rc
+  out=$(doctor_run 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "缺失只算 warn，仍返回 0"
+  assert_contains "$out" "产物已消失" "提示产物缺失"
+  assert_contains "$out" "verify --fix" "给出修复建议"
+}
+
+test_setup_fix_requires_verify() {
+  local out rc
+  out=$(timeout 30 bash "$ROOT/setup.sh" install --pick pkg --fix 2>&1); rc=$?
+  assert_rc_eq 2 "$rc" "--fix 非 verify 时报错退出 2"
+  assert_contains "$out" "--fix 只能与 verify" "错误信息明确"
+}
+
+test_setup_output_requires_export() {
+  local out rc
+  out=$(timeout 30 bash "$ROOT/setup.sh" install --pick pkg --output /tmp/x.conf 2>&1); rc=$?
+  assert_rc_eq 2 "$rc" "--output 非 export 时报错退出 2"
+  assert_contains "$out" "--output 只能与 export" "错误信息明确"
+}
+
+test_setup_doctor_needs_no_selection() {
+  local out rc
+  out=$(timeout 90 bash "$ROOT/setup.sh" doctor 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "doctor 无需选择即可运行"
+  assert_contains "$out" "doctor 汇总" "输出了汇总"
+}
+
+test_setup_export_needs_no_selection() {
+  local out rc
+  out=$(timeout 90 bash "$ROOT/setup.sh" export --output "$TESTDIR/no-sel.conf" 2>&1); rc=$?
+  # 本机若确有已装包则返回 0；若全无则返回 1。两种都说明它没要求 --pick/--profile/--all
+  assert_contains "$out" "export：" "进入了 export 流程"
+  assert_not_contains "$out" "未选择任何工具" "未因缺选择而失败"
+}
+
+# ===========================================================================
 run_test '所有 Shell 脚本语法'                         test_syntax
 run_test '事件 JSON 转义'                              test_events_json
 run_test '事件 JSONL 写入'                             test_events_emit
@@ -2514,6 +2722,22 @@ run_test '废弃配置键有明确提示'                        test_deprecated
 run_test '每个动作都有专属 status'                     test_actions_have_status
 run_test 'status 走专属实现'                          test_engine_status_uses_action_status
 run_test '各动作 status 输出可读'                     test_action_status_outputs
+run_test '写锁取放'                                  test_state_lock_acquire_release
+run_test '写锁不误删他人锁'                            test_state_lock_ignores_other_holder
+run_test '写锁清理残留'                               test_state_lock_cleans_stale
+run_test '写锁被占时错误信息正确'                       test_state_lock_acquire_blocked_message
+run_test 'verify 不加 --fix 不修复'                   test_engine_verify_without_fix_fails
+run_test 'verify --fix 修复后复验'                    test_engine_verify_fix_converges
+run_test 'verify --fix 在 dry-run 下不修复'            test_engine_verify_fix_dry_run_noop
+run_test 'export 生成 profile'                        test_export_writes_profile
+run_test 'export 空状态返回非零'                       test_export_empty_state_fails
+run_test 'export 文件名即 profile 名'                  test_export_profile_name_from_path
+run_test 'doctor 跑完全部检查'                         test_doctor_runs_all_checks
+run_test 'doctor 提示清单产物缺失'                     test_doctor_manifest_missing_artifact_warns
+run_test '--fix 只能配 verify'                        test_setup_fix_requires_verify
+run_test '--output 只能配 export'                     test_setup_output_requires_export
+run_test 'doctor 不需要选择'                           test_setup_doctor_needs_no_selection
+run_test 'export 不需要选择'                           test_setup_export_needs_no_selection
 
 if [[ -n "$FILTER" && "$MATCHED" == 0 ]]; then
   printf '没有用例匹配过滤条件：%s\n' "$FILTER" >&2

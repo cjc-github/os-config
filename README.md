@@ -74,17 +74,21 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 - `extends` 会先并入父清单的全部工具，再追加自己的（按顺序去重）。
 - 内置四份清单：`minimal` → `default` → `dev` 逐层扩展，`ai` 单独一套。
 
-### 3. 五动词 —— 声明“做什么”
+### 3. 七动词 —— 声明“做什么”
 
-| 动词 | 语义 | 顺序 |
-|---|---|---|
-| `install` | 安装/应用（已装即跳过，幂等） | 依赖闭包，依赖优先 |
-| `update` | 更新到目标版本 | 依赖优先 |
-| `remove` | 卸载/还原配置 | **逆序**，被依赖者先删 |
-| `verify` | 只校验，不修改 | 依赖优先 |
-| `status` | 展示当前状态 | 依赖优先 |
+| 动词 | 语义 | 顺序 | 读写 |
+|---|---|---|---|
+| `install` | 安装/应用（已装即跳过，幂等） | 依赖闭包，依赖优先 | 写 |
+| `update` | 更新到目标版本（配置类等价 install） | 依赖优先 | 写 |
+| `remove` | 卸载/还原配置 | **逆序**，被依赖者先删 | 写 |
+| `verify` | 校验，不修改；`--fix` 时未通过会自动 apply 后复验 | 依赖优先 | 读（`--fix` 为写） |
+| `status` | 展示当前状态 | 依赖优先 | 读 |
+| `export` | 扫描本机已装包与已应用配置，导出为 profile | 不需要选择 | 读 |
+| `doctor` | 环境体检（sudo/磁盘/apt 锁/网络/清单一致性） | 不需要选择 | 读 |
 
 `type=config` 的动作按约定实现 `action_<名字>_apply|remove|verify|status` 四个动词（status 只读，输出一行摘要；缺失时才回退为通用状态输出）。
+
+写动词会取 `state/.lock` 独占锁，避免两个运行互相踩清单快照；残留锁（持有者已退出）会被自动清理。
 
 ## 命令行参数
 
@@ -97,12 +101,29 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 | `--json` | 与 `--list` 连用，输出 JSON（供 Web UI 读取） |
 | `--dry-run` | 只打印计划，不写盘 |
 | `--force` | 忽略幂等判断，强制重做 |
+| `--fix` | 与 `verify` 连用：校验未通过时自动 apply 修复后复验 |
 | `--keep-going` | 单项失败不中断，跑完再汇总 |
 | `--no-sudo` | 跳过需要提权的项 |
 | `--yes` | 非交互确认（自动回答 y） |
+| `--output <路径>` | 与 `export` 连用，指定导出的 profile 路径 |
 | `--debug` | 调试日志 |
 
-`--profile`、`--pick`、`--all` **三选一**，同时给出会报错（退出码 2）。不加选择时默认 `--profile default`。
+`--profile`、`--pick`、`--all` **三选一**，同时给出会报错（退出码 2）。不加选择时默认 `--profile default`；`export` 与 `doctor` 不需要选择。`--fix` 只能配 `verify`，`--output` 只能配 `export`，用错组合同样报错退出 2。
+
+## 换机器复刻
+
+```bash
+# 旧机器
+./setup.sh export                        # → profiles/exported.conf
+# 把 config/user.env 与 profiles/exported.conf 拷到新机器（参数按导出注释核对）
+
+# 新机器
+./setup.sh doctor                        # 先体检，确认 sudo/磁盘/网络都正常
+./setup.sh install --profile exported    # 按导出清单安装
+./setup.sh verify --fix --profile exported   # 兜底：校验并自动修复偏差
+```
+
+`export` 会扫描 catalog，把实际已安装的 package 与清单里已记录的 config 写成一份 profile（默认 `profiles/exported.conf`，已 gitignore）；生效参数写在文件末尾的注释里，供新机器核对 `config/user.env`。
 
 ## 重要默认值
 
@@ -128,6 +149,8 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 - apt/dpkg 操作前 `wait_for_apt_lock`；重试由 `with_retry` 统一处理。
 - npm 全局安装失败且输出含 `ENOTEMPTY` 时，只清理 `.<package>-*` 隐藏 rename 残留并重试一次，不动正式包目录。
 - `--keep-going` 时单项失败不触发回滚、最终仍返回非零；否则首个失败即回滚。
+- 写动词（含 `verify --fix`）取 `state/.lock` 独占锁：并发运行会直接报错而不是互相覆盖清单；残留锁按 pid 探测后自动清理，只释放自己持有的锁。
+- `doctor` 是纯只读体检，不改任何东西；它会把"清单记录的产物已消失"判为需关注并提示用 `verify --fix` 收敛。
 
 ## Web UI
 
@@ -140,7 +163,7 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 ```
 
 - 依赖 `python3` >= 3.10（启动时校验版本），只用标准库；`--host` 仅接受 `127.0.0.1` 或 `localhost`。
-- 顶栏「执行动词」下拉框覆盖引擎的五个动词：安装 / 更新 / 卸载 / 校验 / 状态；选「卸载」会先弹确认框。工具面板里的「卸载所选」仍按已安装清单逐项确认。
+- 顶栏「执行动词」下拉框覆盖引擎五个**与选择相关**的动词：安装 / 更新 / 卸载 / 校验 / 状态；选「卸载」会先弹确认框。工具面板里的「卸载所选」仍按已安装清单逐项确认。`export` 与 `doctor` 不需要选择，目前只在命令行提供。
 - 「预览计划」按当前动词生成依赖闭包计划；只读动词（校验/状态）没有 dry-run 短路，预览一律改用安装动词生成，不会真的去跑校验。
 - 首次启动若需要 sudo，会先执行 `sudo -v` 预授权，之后每 50 秒刷新凭据；授权失败只让需要提权的动作不可用，不影响页面启动。
 - 每次启动生成一次性 token，终端打印 `http://127.0.0.1:<port>/?token=...`；未带 token 的请求一律返回 401。
@@ -152,28 +175,30 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 ## 目录结构
 
 ```text
-setup.sh                 唯一入口（五动词）
+setup.sh                 唯一入口（七动词）
 ui.sh                    Web UI 启动器（本机回环 + 一次性 token）
 ui/                      Web UI 服务与静态资源（Python 标准库）
   server.py              HTTP/SSE 服务、运行编排
   schema.py              参数白名单、adhoc id、路径与文件名校验
   static/                index.html / app.js / style.css
 catalog/                 声明式数据层：base.catalog、config.catalog
-profiles/                选择清单：minimal/default/dev/ai
+profiles/                选择清单：minimal/default/dev/ai（exported.conf 由 export 生成，gitignore）
 engine/
   lib/catalog.sh         目录加载与校验
   lib/profile.sh         清单解析、继承、tokens 解析
   lib/graph.sh           依赖闭包与拓扑/逆序
   lib/backends.sh        后端适配器（apt/npm/snap）
-  lib/engine.sh          五动词编排器
+  lib/engine.sh          七动词编排器
+  lib/doctor.sh          doctor 动词：环境体检
+  lib/export.sh          export 动词：扫描本机状态导出 profile
   lib/events.sh          结构化事件（JSONL，供 Web UI 实时日志）
   lib/list_json.sh       catalog/profile 的 JSON 序列化
-  lib/state.sh           state/manifest.conf 清单读写
+  lib/state.sh           state/manifest.conf 清单读写 + 并发锁
   lib/rollback.sh        备份/回滚/临时文件
   lib/log.sh             终端 + 文件日志（脱敏）
   lib/util.sh            配置加载、步骤、重试、sudo、代理、nvm
   actions/*.sh           配置动作：mirrors/proxy/git/ssh/syslog/nosuspend/nodejs
-state/                   运行时状态（manifest + 每动作持久备份）
+state/                   运行时状态（manifest + 每动作持久备份 + .lock）
 tests/run.sh             不依赖 Bats 的回归测试
 docs/DESIGN.md           详细设计
 logs/                    运行时日志（.gitignore 忽略）
@@ -182,7 +207,7 @@ logs/                    运行时日志（.gitignore 忽略）
 ## 自测
 
 ```bash
-./tests/run.sh            # Bash 回归用例，断言 catalog/profile/graph/state/rollback/后端/引擎/动作/Web UI
+./tests/run.sh            # Bash 回归用例，断言 catalog/profile/graph/state/rollback/后端/引擎/动作/并发锁/export/doctor/Web UI
 ./tests/run.sh graph      # 只跑显示名或用例函数名里含 graph 的用例
 python3 -m unittest discover -s tests -p 'test_*.py' -v   # Web UI 服务端用例
 node --test tests/test_app_js.js                          # 前端用例
