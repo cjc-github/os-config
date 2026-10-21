@@ -36,13 +36,45 @@ _nodejs_activate() {
 
 # npm config 幂等写入
 _nodejs_npm_set_if_different() {
-  local k="$1" v="$2" name="${3:-$1}" cur
+  local k="$1" v="$2" name="$3" cur
   cur=$(npm config get "$k" 2>/dev/null || echo "")
   if [[ "$cur" != "$v" || "${FORCE:-0}" == 1 ]]; then
     run_step "npm config set $name" npm config set "$k" "$v" || return 1
   else
-    log_debug "npm config $name 已是 $v，跳过"
+    log_debug "[$id] npm config $name 已是 $v，跳过"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# npm 配置原值簿记：apply 改了哪些键，remove 要按原值还原（原本没有就删掉）
+# ---------------------------------------------------------------------------
+
+# 用户级 npmrc 路径
+_nodejs_npmrc_path() {
+  local p
+  p=$(npm config get userconfig 2>/dev/null || true)
+  [[ -n "$p" && "$p" != "undefined" && "$p" != "null" ]] || p="$HOME/.npmrc"
+  printf '%s' "$p"
+}
+
+# 读出 npmrc 里显式设置的值（未设置则无输出；npm config get 会返回内置默认值，读不到真实情况）
+_nodejs_npmrc_get() {
+  local file="$1" key="$2" line
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line; do
+    line="${line%%;*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ "$line" == "$key="* ]] && { printf '%s' "${line#*=}"; return 0; }
+  done <"$file"
+}
+
+# 记录原值（只记第一次）：<key>=<值>，值为空表示「原本没有这一项」
+_nodejs_npm_record_original() {
+  local dir="$1" key="$2" file="$1/npmrc.orig" val
+  [[ -f "$file" ]] || : >"$file"
+  grep -q "^$key=" "$file" && return 0
+  val="$(_nodejs_npmrc_get "$(_nodejs_npmrc_path)" "$key")"
+  printf '%s=%s\n' "$key" "$val" >>"$file"
 }
 
 action_nodejs_apply() {
@@ -102,6 +134,17 @@ action_nodejs_apply() {
   nvm use --silent "$node_wanted" >/dev/null 2>&1 || true
 
   # --- 4) npm 提速配置 ---
+  # 先记录原值：remove 要按原值还原（原本没有的键就删掉），否则会留下指向
+  # 已被删除的 node 环境的 npm 设置。
+  local npmdir
+  npmdir="$(state_action_dir nodejs)" || return 1
+  _nodejs_npm_record_original "$npmdir" registry
+  _nodejs_npm_record_original "$npmdir" audit
+  _nodejs_npm_record_original "$npmdir" fund
+  _nodejs_npm_record_original "$npmdir" prefer-offline
+  _nodejs_npm_record_original "$npmdir" fetch-timeout
+  _nodejs_npm_record_original "$npmdir" fetch-retry-maxtimeout
+
   [[ -z "$NPM_REGISTRY" ]] || _nodejs_npm_set_if_different registry "$NPM_REGISTRY" "registry $NPM_REGISTRY" || return 1
   _nodejs_npm_set_if_different audit "false" || return 1
   _nodejs_npm_set_if_different fund "false" || return 1
@@ -113,19 +156,39 @@ action_nodejs_apply() {
 }
 
 action_nodejs_remove() {
-  local id="$1"
+  local id="$1" dir file key val rc=0
+  dir="$(state_action_dir nodejs)"
   if [[ ! -d "$_NODEJS_NVM_DIR" ]]; then
     log_info "[$id] $_NODEJS_NVM_DIR 不存在，无需删除"
-    return 0
-  fi
-  if [[ "${FORCE:-0}" != 1 ]]; then
-    if ! confirm "[$id] 删除 $_NODEJS_NVM_DIR 会一并删除其中的 Node 与全局包，确认？"; then
-      log_warn "[$id] 已取消；如需强制删除请加 --force"
-      return 0
+  else
+    if [[ "${FORCE:-0}" != 1 ]]; then
+      if ! confirm "[$id] 删除 $_NODEJS_NVM_DIR 会一并删除其中的 Node 与全局包，确认？"; then
+        log_warn "[$id] 已取消；如需强制删除请加 --force"
+        return 100   # 约定：skipped（用户主动放弃，不算成功也不算失败）
+      fi
     fi
+    run_step "删除 $_NODEJS_NVM_DIR" rm -rf -- "$_NODEJS_NVM_DIR" || rc=1
+    log_ok "[$id] 已移除 nvm/Node（$_NODEJS_NVM_DIR）"
   fi
-  run_step "删除 $_NODEJS_NVM_DIR" rm -rf -- "$_NODEJS_NVM_DIR" || return 1
-  log_ok "[$id] 已移除 nvm/Node（$_NODEJS_NVM_DIR）"
+
+  # 还原 npm 配置：apply 改了哪些键就还原哪些（原本没有的删掉）
+  file="$dir/npmrc.orig"
+  if [[ -f "$file" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      key="${line%%=*}"
+      val="${line#*=}"
+      if [[ -z "$val" ]]; then
+        run_step "删除 npm config $key" npm config delete "$key" || rc=1
+      else
+        run_step "还原 npm config $key" npm config set "$key" "$val" || rc=1
+      fi
+    done <"$file"
+    rm -f -- "$file"
+    log_ok "[$id] 已还原 npm 配置"
+  fi
+
+  (( rc == 0 )) || return 1
 }
 
 action_nodejs_verify() {
@@ -158,5 +221,30 @@ action_nodejs_verify() {
     log_error "[$id] npm 不可用"
     rc=1
   fi
+
+  # npm 源也要与配置一致（apply 会写 registry）
+  if [[ -n "$NPM_REGISTRY" ]] && cmd_exists npm; then
+    local cur_registry
+    cur_registry="$(npm config get registry 2>/dev/null || true)"
+    if [[ "$cur_registry" == "$NPM_REGISTRY" ]]; then
+      log_debug "[$id] npm registry=$cur_registry"
+    else
+      log_error "[$id] npm registry 不匹配：${cur_registry:-<空>} != $NPM_REGISTRY"
+      rc=1
+    fi
+  fi
+
   (( rc == 0 )) || return 1
+}
+
+# status：nvm / Node 状态（只读）
+action_nodejs_status() {
+  local id="$1" v=""
+  if [[ ! -d "$_NODEJS_NVM_DIR" ]]; then
+    printf '    %-22s %s\n' "$id" "未安装（无 $_NODEJS_NVM_DIR）"
+    return 0
+  fi
+  _nodejs_activate >/dev/null 2>&1 || true
+  v="$(node --version 2>/dev/null || true)"
+  printf '    %-22s %s\n' "$id" "已安装（node=${v:-?}）"
 }

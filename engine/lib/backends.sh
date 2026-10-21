@@ -102,6 +102,15 @@ _apt_install_impl() {
 _backend_apt_install() { _apt_install_impl "$1" 1; }
 _backend_apt_update()  { _apt_install_impl "$1" 0; }
 
+# 该工具的包是否已安装（remove 前判断依赖方是否还在用）
+_backend_apt_is_installed() {
+  local id="$1" pkg
+  for pkg in ${CAT_PACKAGES[$id]}; do
+    _apt_is_installed "$pkg" && return 0
+  done
+  return 1
+}
+
 _backend_apt_verify() {
   local id="$1" pkg rc=0 want="" have=""
   for pkg in ${CAT_PACKAGES[$id]}; do
@@ -211,6 +220,9 @@ _npm_install_impl() {
 _backend_npm_install() { _npm_install_impl "$1" 0; }
 _backend_npm_update()  { _npm_install_impl "$1" 1; }
 
+# 该工具的全局包是否已安装
+_backend_npm_is_installed() { _npm_tool_state "$1"; }
+
 _backend_npm_verify() {
   activate_nvm_default || true
   _npm_tool_state "$1" || { log_error "[$1] npm 工具状态不符合预期"; return 1; }
@@ -257,6 +269,15 @@ _backend_snap_install() {
   fi
   require_sudo || return 1
   run_step "snap install ${missing[*]}" with_retry 3 5 -- sudo snap install "${missing[@]}"
+}
+
+# 该工具的 snap 包是否已安装
+_backend_snap_is_installed() {
+  local id="$1" pkg
+  for pkg in ${CAT_PACKAGES[$id]}; do
+    _snap_is_installed "$pkg" && return 0
+  done
+  return 1
 }
 
 _backend_snap_update() {

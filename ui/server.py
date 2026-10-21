@@ -115,7 +115,10 @@ _CONTENT_TYPES = {
 
 _TOKEN_COOKIE = "os_config_token"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_RUN_VERBS = ("install", "remove", "verify")
+_RUN_VERBS = ("install", "update", "remove", "verify", "status")
+# 只读动词用 --dry-run 预览时不会短路（引擎只对写动词短路），
+# 因此预览一律用写动词生成，避免真的去跑 curl 校验之类的副作用。
+_PLAN_VERBS = ("install", "update", "remove")
 _HISTORY_LOG_LIMIT = 1024 * 1024
 
 # 与 engine/lib/log.sh 的 _redact 保持一致：写盘与推送前统一脱敏。
@@ -403,7 +406,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _merged_params(self) -> dict[str, str]:
         config_dir = self.server.config.project_dir / "config"
-        merged = schema.read_env_file(config_dir / "user.env")
+        # versions.env 是引擎的版本/源默认值来源，也要参与合并，
+        # 否则 UI 里看不到 NPM_REGISTRY 等只写在 versions.env 的默认值。
+        merged = schema.read_env_file(config_dir / "versions.env")
+        merged.update(schema.read_env_file(config_dir / "user.env"))
         merged.update(schema.read_env_file(config_dir / "ui.env"))
         return merged
 
@@ -436,9 +442,15 @@ class Handler(BaseHTTPRequestHandler):
         defaults = {
             key: value
             for key, value in schema.read_env_file(
-                self.server.config.project_dir / "config" / "user.env").items()
+                self.server.config.project_dir / "config" / "versions.env").items()
             if not schema.PARAM_SPECS[key]["secret"]
         }
+        defaults.update({
+            key: value
+            for key, value in schema.read_env_file(
+                self.server.config.project_dir / "config" / "user.env").items()
+            if not schema.PARAM_SPECS[key]["secret"]
+        })
 
         job = self.server.current_job
         if job is None:
@@ -495,8 +507,10 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             ids.add(ident)
             raw = entry.get("deps") or ""
-            deps[ident] = [part.strip() for part in str(raw).split(",")
-                           if part.strip()]
+            # 引擎把 deps 存成空格分隔（catalog.sh 会把逗号换成空格），
+            # 这里两种分隔符都接受，避免多依赖工具的依赖方被漏掉。
+            deps[ident] = [part for part in str(raw).replace(",", " ").split()
+                           if part]
         return ids, deps
 
     def _validate_request(self, body: dict) -> tuple[str, list[str], dict, list[str]] | None:
@@ -598,7 +612,8 @@ class Handler(BaseHTTPRequestHandler):
                 required_by.setdefault(dep, []).append(selector)
 
         cmd = list(self.server.config.setup_cmd or [])
-        cmd += [verb, "--dry-run", "--pick", _pick_arg(pick), "--yes"]
+        cmd += [verb if verb in _PLAN_VERBS else "install",
+                "--dry-run", "--pick", _pick_arg(pick), "--yes"]
         try:
             logs, events, rc = self._run_dry(cmd)
         except OSError as exc:

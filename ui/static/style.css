@@ -81,6 +81,15 @@ body {
   flex-wrap: wrap;
 }
 .planbar-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+#verb {
+  width: auto;
+  min-width: 84px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+}
 .plan-strip {
   display: flex;
   align-items: center;

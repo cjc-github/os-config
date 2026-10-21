@@ -15,12 +15,8 @@ declare -g  ENGINE_FAILED=0
 # ---------------------------------------------------------------------------
 # 动作分派
 # ---------------------------------------------------------------------------
-_ENGINE_VERB_MAP_INSTALL=apply
-_ENGINE_VERB_MAP_UPDATE=apply
-_ENGINE_VERB_MAP_REMOVE=remove
-_ENGINE_VERB_MAP_VERIFY=verify
-_ENGINE_VERB_MAP_STATUS=status
 
+# 五动词 → 配置动作动词：install/update 都落到 apply（apply 自身保证幂等）
 _engine_action_verb() {
   case "$1" in
     install) printf 'apply' ;;
@@ -104,6 +100,46 @@ _engine_warn_dependents() {
     dents="${dents% }"
     [[ -n "$dents" ]] && log_warn "[$id] 被以下项依赖，它们将先于本项删除：$dents"
   done
+  _engine_warn_external_dependents
+}
+
+# 该工具是否已安装：config 类查清单，package 类问后端。
+_engine_tool_installed() {
+  local id="$1" fn
+  if [[ "${CAT_TYPE[$id]:-}" == config ]]; then
+    state_has "$id"
+    return $?
+  fi
+  fn="_backend_${CAT_BACKEND[$id]:-}_is_installed"
+  declare -F "$fn" >/dev/null || return 1
+  "$fn" "$id"
+}
+
+# 选集之外、但已安装的依赖者：卸载它们的依赖后，这些项会失效。
+# graph_dependents 只看得到本次闭包内的依赖者，必须再扫一遍完整 catalog。
+_engine_warn_external_dependents() {
+  local id dent dep in_set
+  local -a external=()
+  for id in "${GRAPH_ORDER[@]}"; do
+    for dent in "${CAT_ORDER[@]}"; do
+      [[ "$dent" == "$id" ]] && continue
+      case " ${CAT_DEPS[$dent]:-} " in
+        *" $id "*) ;;
+        *) continue ;;
+      esac
+      in_set=0
+      for dep in "${GRAPH_ORDER[@]}"; do
+        if [[ "$dep" == "$dent" ]]; then in_set=1; break; fi
+      done
+      (( in_set == 1 )) && continue
+      _engine_tool_installed "$dent" || continue
+      external+=("$dent")
+    done
+  done
+  if (( ${#external[@]} > 0 )); then
+    log_warn "以下已安装的工具依赖本次卸载的项，卸载后可能失效：${external[*]}"
+    log_warn "如需一并卸载，请把它们一起加入本次选择。"
+  fi
 }
 
 # ---------------------------------------------------------------------------

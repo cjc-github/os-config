@@ -18,14 +18,20 @@ catalog_reset() {
   CAT_ORDER=()
 }
 
-# catalog_expand_vars <raw> —— 只把 $VAR / ${VAR} 替换为环境变量值
+# catalog_expand_vars <raw> —— 变量替换
+#   支持 $VAR、${VAR}、${VAR:-默认值}：变量为空或未定义时使用默认值。
+#   只识别 $VAR 形式；文案里的单个 $ 不会被误吞。
 catalog_expand_vars() {
-  local raw="$1" out="" prefix
-  while [[ "$raw" =~ ^([^\$]*)\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(.*)$ ]]; do
+  local raw="$1" out="" prefix name def val
+  while [[ "$raw" =~ ^([^\$]*)\$\{?([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}?(.*)$ ]]; do
     prefix="${BASH_REMATCH[1]}"
+    name="${BASH_REMATCH[2]}"
+    def="${BASH_REMATCH[4]}"
+    val="${!name-}"
+    if [[ -z "$val" ]]; then val="$def"; fi
     out+="$prefix"
-    out+="${!BASH_REMATCH[2]:-}"
-    raw="${BASH_REMATCH[3]}"
+    out+="$val"
+    raw="${BASH_REMATCH[5]}"
   done
   out+="$raw"
   printf '%s' "$out"
@@ -109,7 +115,13 @@ catalog_load_file() {
 
     key="$(util_trim "${line%%=*}")"
     value="$(util_trim "${line#*=}")"
-    value="$(catalog_expand_vars "$value")"
+    # desc/group 是给人看的文案，不做变量展开：文案里的 $ 不应被静默改写。
+    # artifacts 也不在这里展开：它由 catalog_expand_artifacts 在使用时展开，
+    # 否则同一个路径会被展开两次（值里再出现 $ 就会被二次解释）。
+    case "$key" in
+      desc|group|artifacts) ;;
+      *) value="$(catalog_expand_vars "$value")" ;;
+    esac
     [[ -n "${seen_key[$key]+x}" ]] && { log_error "catalog 键重复：$file:$line_no（$id.$key）"; return 1; }
     seen_key[$key]=1
 
@@ -179,6 +191,7 @@ catalog_validate() {
 }
 
 # catalog_expand_artifacts <id> —— 展开 artifacts 路径（~ 与环境变量）
+# 展开只在这里做一次：catalog 加载时不再展开 artifacts，避免二次解释。
 catalog_expand_artifacts() {
   local id="$1" path
   for path in ${CAT_ARTIFACTS[$id]}; do

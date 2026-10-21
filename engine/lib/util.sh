@@ -20,6 +20,17 @@ load_user_config() {
     . "$f"
     set +a
   done
+  _warn_deprecated_config
+}
+
+# 已废弃的配置键：曾经有效、现在由别的机制接管。
+# 静默忽略会让用户以为开关还起作用，因此明确提示一次。
+_warn_deprecated_config() {
+  declare -F log_warn >/dev/null 2>&1 || return 0
+  if [[ -n "${SSH_INSTALL_SERVER+x}" ]]; then
+    log_warn "SSH_INSTALL_SERVER 已废弃（openssh-server 现在是 catalog 条目），本项不再生效"
+    log_command './setup.sh install --pick openssh-server'
+  fi
 }
 load_user_config
 
@@ -331,9 +342,15 @@ ensure_proxy_host_reachable() {
   return 1
 }
 
+# 代理连通性验证：目标地址与超时都可由 config/user.env 覆盖
+#   PROXY_TEST_URL         默认 https://github.com
+#   PROXY_CONNECT_TIMEOUT  默认 5（秒）
+#   PROXY_MAX_TIME         默认 15（秒）
 ensure_proxy_curl_connectivity() {
-  local proxy_url="${1:-}" test_url="${2:-https://github.com}"
-  local connect_timeout="${3:-5}" max_time="${4:-15}"
+  local proxy_url="${1:-}"
+  local test_url="${2:-${PROXY_TEST_URL:-https://github.com}}"
+  local connect_timeout="${3:-${PROXY_CONNECT_TIMEOUT:-5}}"
+  local max_time="${4:-${PROXY_MAX_TIME:-15}}"
   if ! cmd_exists curl; then
     log_error "缺少 curl 命令，无法执行代理真实访问验证"
     return 1

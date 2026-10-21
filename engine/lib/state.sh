@@ -113,9 +113,3 @@ state_has() {
   [[ -f "$STATE_FILE" ]] || return 1
   grep -q "^${tool}|" "$STATE_FILE"
 }
-
-# state_list —— 打印清单（供 status 展示）
-state_list() {
-  [[ -f "$STATE_FILE" ]] || return 0
-  grep -v '^[[:space:]]*$' "$STATE_FILE" 2>/dev/null || true
-}

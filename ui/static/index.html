@@ -18,6 +18,13 @@
       <div id="plan-summary" class="plan-strip" aria-live="polite"></div>
       <div id="dep-banner" class="plan-note" hidden></div>
       <button id="plan-btn" type="button" class="ghost">预览计划</button>
+      <select id="verb" aria-label="执行动词" title="选择要执行的动词">
+        <option value="install">安装</option>
+        <option value="update">更新</option>
+        <option value="remove">卸载</option>
+        <option value="verify">校验</option>
+        <option value="status">状态</option>
+      </select>
       <button id="run-btn" type="button" class="primary">开始执行</button>
     </div>
     <div class="status">

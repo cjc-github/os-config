@@ -8,6 +8,9 @@
 #   PROXY_HOST     默认空：当前 IPv4 最后一段替换为 1
 #   PROXY_PORT     默认空：7890
 #   NO_PROXY       默认 localhost,127.0.0.1,::1
+#   PROXY_TEST_URL       默认 https://github.com；verify 阶段 curl -x 的真实访问地址
+#   PROXY_CONNECT_TIMEOUT 默认 5（秒）
+#   PROXY_MAX_TIME       默认 15（秒）
 #
 # 产物：~/.bashrc 中的托管块（marker 界定）。remove 仅删除该块。
 
@@ -19,6 +22,9 @@ _proxy_defaults() {
   : "${PROXY_HOST:=}"
   : "${PROXY_PORT:=}"
   : "${NO_PROXY:=localhost,127.0.0.1,::1}"
+  : "${PROXY_TEST_URL:=https://github.com}"
+  : "${PROXY_CONNECT_TIMEOUT:=5}"
+  : "${PROXY_MAX_TIME:=15}"
 }
 
 # 解析失败时打印可操作诊断并返回非 0
@@ -151,6 +157,20 @@ action_proxy_verify() {
   fi
   log_ok "[$id] proxy 块存在：HTTPS_PROXY=$proxy_url"
 
-  ensure_proxy_curl_connectivity "$proxy_url" "https://github.com" || return 1
+  ensure_proxy_curl_connectivity "$proxy_url" "$PROXY_TEST_URL" \
+    "$PROXY_CONNECT_TIMEOUT" "$PROXY_MAX_TIME" || return 1
   log_ok "[$id] 代理配置校验通过"
+}
+
+# status：~/.bashrc 里的代理块状态（只读）
+action_proxy_status() {
+  local id="$1" bashrc="$HOME/.bashrc" url=""
+  _proxy_defaults
+  if [[ -f "$bashrc" ]] && file_contains "$bashrc" "$_PROXY_BEGIN"; then
+    url="$(sed -n -E '/^export HTTPS_PROXY=/{s/^export HTTPS_PROXY=//; p; q}' "$bashrc")"
+    url="${url%\'}"; url="${url#\'}"
+    printf '    %-22s %s\n' "$id" "已写入代理块（${url:-<空>}）"
+  else
+    printf '    %-22s %s\n' "$id" "未写入代理块"
+  fi
 }

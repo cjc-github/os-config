@@ -6,6 +6,9 @@
 # 参数（config/user.env）：
 #   MIRROR_APT_URL        默认 https://mirrors.tuna.tsinghua.edu.cn/ubuntu
 #   MIRROR_APT_PORTS_URL  默认 https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+#   MIRROR_SKIP_APT       默认 false；true 时不改写 APT 源（已自备源的内网环境）
+#   MIRROR_SKIP_APT_UPDATE 默认 false；true 时不执行 apt update（完全离线）
+#   APT_UPGRADE          默认 false；true 时在 apt update 之后执行系统全量 apt upgrade
 #
 # remove 语义：把源文件还原为「本动作首次改写前」的持久备份，并 apt update。
 #   持久备份存放在 $STATE_DIR/actions/mirrors/ 下，跨运行有效（与一次性回滚不同）。
@@ -13,6 +16,9 @@
 _mirrors_defaults() {
   : "${MIRROR_APT_URL:=https://mirrors.tuna.tsinghua.edu.cn/ubuntu}"
   : "${MIRROR_APT_PORTS_URL:=https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports}"
+  : "${MIRROR_SKIP_APT:=false}"
+  : "${MIRROR_SKIP_APT_UPDATE:=false}"
+  : "${APT_UPGRADE:=false}"
 }
 
 # 输出 amd64/arm64 对应的镜像地址
@@ -34,6 +40,32 @@ _mirrors_origin_re() {
     arm64|armhf|riscv64|s390x|ppc64el) printf '%s\n' 'ports\.ubuntu\.com' ;;
     *) printf '%s\n' 'ubuntu\.com' ;;
   esac
+}
+
+# apt update（MIRROR_SKIP_APT_UPDATE=true 时跳过，用于完全离线环境）
+_mirrors_apt_update() {
+  _mirrors_defaults
+  if [[ "$MIRROR_SKIP_APT_UPDATE" == true ]]; then
+    log_info "[$id] MIRROR_SKIP_APT_UPDATE=true：跳过 apt update"
+    return 0
+  fi
+  require_sudo || return 1
+  wait_for_apt_lock || return 1
+  run_step "apt update" with_retry 2 10 -- sudo apt-get update
+}
+
+# 系统全量 apt upgrade（APT_UPGRADE=true 且执行过 apt update 时才跑）
+_mirrors_apt_upgrade() {
+  _mirrors_defaults
+  if [[ "$APT_UPGRADE" != true ]]; then
+    return 0
+  fi
+  if [[ "$MIRROR_SKIP_APT_UPDATE" == true ]]; then
+    log_warn "[$id] 已跳过 apt update，跳过 apt upgrade（没有可用索引）"
+    return 0
+  fi
+  run_step "apt-get upgrade" with_retry 2 10 -- \
+    sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade
 }
 
 _mirrors_sources() {
@@ -74,40 +106,44 @@ action_mirrors_apply() {
   dir="$(state_action_dir mirrors)" || return 1
   repl="$(_mirrors_escape_repl "$url")"
 
-  require_sudo || return 1
-  wait_for_apt_lock || return 1
-
-  local -a targets=()
-  while IFS= read -r f; do
-    if grep -qE "$origin_re" "$f"; then
-      targets+=("$f")
-    elif [[ "${FORCE:-0}" == 1 ]]; then
-      targets+=("$f")
-    else
-      log_info "已是镜像或非海外源，跳过：$f"
-    fi
-  done < <(_mirrors_sources)
-
-  if (( ${#targets[@]} == 0 )); then
-    log_ok "[$id] APT 源无需更改"
+  if [[ "$MIRROR_SKIP_APT" == true ]]; then
+    log_info "[$id] MIRROR_SKIP_APT=true：跳过 APT 源改写（保留现有源配置）"
   else
-    for f in "${targets[@]}"; do
-      _mirrors_durable_backup "$dir" "$f" || return 1
-      register_rollback "$f" sudo
-      tmp=$(mktemp) || { log_error "[$id] 无法创建临时文件"; return 1; }
-      register_tmpfile "$tmp"
-      run_step "生成新的 $f" \
-        sudo sed -E -e "s|(URIs:[[:space:]]+)(https?://[^/]+/ubuntu[^ ]*)|\1${repl}|g" \
-                    -e "s|(deb(-src)?[[:space:]]+)(https?://[^ ]+ubuntu[^ ]*)|\1${repl}|g" \
-                    "$f" >"$tmp" || return 1
-      run_step "覆盖 $f" sudo cp -- "$tmp" "$f" || return 1
-      _mirrors_changed_add "$dir" "$f"
-      log_ok "[$id] 已更新：$f -> $url"
-      changed=1
-    done
+    require_sudo || return 1
+
+    local -a targets=()
+    while IFS= read -r f; do
+      if grep -qE "$origin_re" "$f"; then
+        targets+=("$f")
+      elif [[ "${FORCE:-0}" == 1 ]]; then
+        targets+=("$f")
+      else
+        log_info "已是镜像或非海外源，跳过：$f"
+      fi
+    done < <(_mirrors_sources)
+
+    if (( ${#targets[@]} == 0 )); then
+      log_ok "[$id] APT 源无需更改"
+    else
+      for f in "${targets[@]}"; do
+        _mirrors_durable_backup "$dir" "$f" || return 1
+        register_rollback "$f" sudo || return 1
+        tmp=$(mktemp) || { log_error "[$id] 无法创建临时文件"; return 1; }
+        register_tmpfile "$tmp"
+        run_step "生成新的 $f" \
+          sudo sed -E -e "s|(URIs:[[:space:]]+)(https?://[^/]+/ubuntu[^ ]*)|\1${repl}|g" \
+                      -e "s|(deb(-src)?[[:space:]]+)(https?://[^ ]+ubuntu[^ ]*)|\1${repl}|g" \
+          "$f" >"$tmp" || return 1
+        run_step "覆盖 $f" sudo cp -- "$tmp" "$f" || return 1
+        _mirrors_changed_add "$dir" "$f"
+        log_ok "[$id] 已更新：$f -> $url"
+        changed=1
+      done
+    fi
   fi
 
-  run_step "apt update" with_retry 2 10 -- sudo apt-get update || return 1
+  _mirrors_apt_update || return 1
+  _mirrors_apt_upgrade || return 1
   log_ok "[$id] 完成（changed=$changed）"
 }
 
@@ -138,8 +174,7 @@ action_mirrors_remove() {
     return 1
   fi
   rm -rf -- "$dir"
-  wait_for_apt_lock || return 1
-  run_step "apt update" with_retry 2 10 -- sudo apt-get update || return 1
+  _mirrors_apt_update || return 1
   log_ok "[$id] 已还原为换源前的 APT 源"
 }
 
@@ -167,4 +202,22 @@ action_mirrors_verify() {
     return 1
   fi
   log_ok "[$id] apt-get check 通过"
+}
+
+# status：当前 APT 源状态（只读，不改任何东西）
+action_mirrors_status() {
+  local id="$1" url f found=0 overseas=0
+  _mirrors_defaults
+  url="$(_mirrors_url_for_arch)"
+  while IFS= read -r f; do
+    found=1
+    grep -qE "$(_mirrors_origin_re)" "$f" && overseas=1
+  done < <(_mirrors_sources)
+  if (( found == 0 )); then
+    printf '    %-22s %s\n' "$id" "未找到 APT 源文件"
+  elif (( overseas == 1 )); then
+    printf '    %-22s %s\n' "$id" "未换源（仍含海外源）"
+  else
+    printf '    %-22s %s\n' "$id" "已换源 → $url"
+  fi
 }

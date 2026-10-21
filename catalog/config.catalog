@@ -45,7 +45,7 @@ packages=openssh-server
 commands=sshd
 track=latest
 deps=openssh-client
-desc=OpenSSH 服务端（默认不选，需要时加入 profile）
+desc=OpenSSH 服务端（默认不选；用 --pick openssh-server 或写进 profile 启用）
 group=config
 
 [log-tools]
@@ -62,7 +62,7 @@ group=config
 [mirrors]
 type=config
 action=mirrors
-artifacts=/etc/apt/sources.list.d/ubuntu.sources
+artifacts=/etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list
 sudo=1
 track=latest
 deps=
@@ -82,7 +82,7 @@ group=config
 [git]
 type=config
 action=git
-artifacts=~/.gitconfig
+artifacts=~/.gitconfig ~/.config/git/config
 sudo=0
 track=latest
 deps=git-cli
@@ -102,7 +102,7 @@ group=config
 [syslog]
 type=config
 action=syslog
-artifacts=/etc/systemd/journald.conf.d/99-os-config.conf ~/.bashrc
+artifacts=/etc/systemd/journald.conf.d/99-os-config.conf ~/.bashrc ~/.local/bin/bat
 sudo=1
 track=latest
 deps=log-tools
@@ -122,7 +122,7 @@ group=config
 [nodejs]
 type=config
 action=nodejs
-artifacts=~/.nvm
+artifacts=~/.nvm ~/.npmrc
 sudo=0
 track=latest
 deps=curl
@@ -133,7 +133,7 @@ group=runtime
 [claude]
 type=package
 backend=npm
-packages=@anthropic-ai/claude-code
+packages=${CLAUDE_CODE_PKG:-@anthropic-ai/claude-code}
 version=$CLAUDE_CODE_VERSION
 commands=claude
 track=pin
@@ -144,7 +144,7 @@ group=ai
 [codex]
 type=package
 backend=npm
-packages=@openai/codex
+packages=${CODEX_PKG:-@openai/codex}
 version=$CODEX_VERSION
 commands=codex
 track=pin
@@ -155,7 +155,7 @@ group=ai
 [opencode]
 type=package
 backend=npm
-packages=opencode-ai
+packages=${OPENCODE_PKG:-opencode-ai}
 version=$OPENCODE_VERSION
 commands=opencode
 track=pin

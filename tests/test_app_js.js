@@ -44,6 +44,13 @@ test("normalizeAdhocId mirrors the server id normalization", () => {
   assert.equal(app.normalizeAdhocId(""), null);
 });
 
+test("normalizeAdhocId strips every leading and trailing dash", () => {
+  // 与 engine/lib/profile.sh、ui/schema.py 的规则一致
+  assert.equal(app.normalizeAdhocId("apt:x--"), "x");
+  assert.equal(app.normalizeAdhocId("apt:x-"), "x");
+  assert.equal(app.normalizeAdhocId("apt:-x"), null);
+});
+
 test("selectionResultIds includes adhoc items before item events arrive", () => {
   assert.deepEqual(app.selectionResultIds(["git", "apt:jq"], []), ["git", "jq"]);
   assert.deepEqual(app.selectionResultIds(["apt:foo", "snap:foo"], []), ["foo"]);

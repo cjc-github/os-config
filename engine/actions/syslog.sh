@@ -70,7 +70,7 @@ action_syslog_apply() {
      && [[ "${FORCE:-0}" != 1 ]]; then
     log_info "[$id] journald drop-in 已是预期值"
   else
-    register_rollback "$_SYSLOG_DROPIN" sudo
+    register_rollback "$_SYSLOG_DROPIN" sudo || return 1
     run_step "创建 journald drop-in 目录" sudo install -d -m 0755 /etc/systemd/journald.conf.d || return 1
     run_step "写入 journald drop-in" sudo install -m 0644 "$tmp" "$_SYSLOG_DROPIN" || return 1
     dropin_changed=1
@@ -78,7 +78,7 @@ action_syslog_apply() {
 
   # --- 移除旧版宽泛 logrotate 规则 ---
   if sudo test -e /etc/logrotate.d/99-os-config; then
-    register_rollback /etc/logrotate.d/99-os-config sudo
+    register_rollback /etc/logrotate.d/99-os-config sudo || return 1
     run_step "移除旧版宽泛 logrotate 规则" sudo rm -f -- /etc/logrotate.d/99-os-config || return 1
   fi
   run_step "校验 logrotate 全局配置" sudo logrotate --debug /etc/logrotate.conf || return 1
@@ -86,7 +86,7 @@ action_syslog_apply() {
   # --- oslogs 别名块 ---
   if [[ -f "$bashrc" ]] && file_contains "$bashrc" "$_SYSLOG_ALIAS_BEGIN"; then
     if [[ "${FORCE:-0}" == 1 ]]; then
-      register_rollback "$bashrc"
+      register_rollback "$bashrc" || return 1
       _syslog_strip_aliases "$bashrc" || return 1
     else
       log_info "[$id] $bashrc 已含 oslogs 别名，跳过重写（--force 可重写）"
@@ -119,18 +119,26 @@ action_syslog_apply() {
 
 action_syslog_remove() {
   local id="$1" bashrc="$HOME/.bashrc" batcat_link rc=0
-  require_sudo || return 1
+  local have_sudo=1
 
-  if sudo test -e "$_SYSLOG_DROPIN"; then
-    register_rollback "$_SYSLOG_DROPIN" sudo
-    run_step "删除 journald drop-in" sudo rm -f -- "$_SYSLOG_DROPIN" || return 1
-    run_step "重启 systemd-journald" sudo systemctl restart systemd-journald || true
+  # 没有 sudo 时也要清理用户级残留（~/.bashrc 别名块、~/.local/bin/bat 软链），
+  # 否则系统级那部分删不掉时，用户级那部分会一直留着。
+  require_sudo || have_sudo=0
+
+  if (( have_sudo == 1 )); then
+    if sudo test -e "$_SYSLOG_DROPIN"; then
+      register_rollback "$_SYSLOG_DROPIN" sudo || return 1
+      run_step "删除 journald drop-in" sudo rm -f -- "$_SYSLOG_DROPIN" || return 1
+      run_step "重启 systemd-journald" sudo systemctl restart systemd-journald || true
+    else
+      log_debug "[$id] journald drop-in 不存在"
+    fi
   else
-    log_debug "[$id] journald drop-in 不存在"
+    log_warn "[$id] 无 sudo 权限，跳过删除 journald drop-in：$_SYSLOG_DROPIN"
   fi
 
   if [[ -f "$bashrc" ]] && file_contains "$bashrc" "$_SYSLOG_ALIAS_BEGIN"; then
-    register_rollback "$bashrc"
+    register_rollback "$bashrc" || return 1
     _syslog_strip_aliases "$bashrc" || return 1
     log_ok "[$id] 已移除 oslogs 别名块"
   fi
@@ -149,11 +157,15 @@ action_syslog_remove() {
     fi
   fi
   (( rc == 0 )) || return 1
+  if (( have_sudo == 0 )); then
+    log_warn "[$id] 用户级配置已还原；journald drop-in 仍需有 sudo 权限时再执行一次 remove"
+    return 100   # 约定：skipped（系统级残留未清理）
+  fi
   log_ok "[$id] 日志配置已还原"
 }
 
 action_syslog_verify() {
-  local id="$1" bashrc="$HOME/.bashrc" rc=0
+  local id="$1" bashrc="$HOME/.bashrc" rc=0 batcat_link
   _syslog_validate || return $?
 
   if sudo -n test -f "$_SYSLOG_DROPIN" 2>/dev/null; then
@@ -176,6 +188,31 @@ action_syslog_verify() {
     rc=1
   fi
 
+  # bat 软链：apply 会创建，remove 会删除，verify 也要检查
+  batcat_link="$(_syslog_bat_link)"
+  if [[ -L "$batcat_link" ]]; then
+    if [[ "$(basename -- "$(readlink -- "$batcat_link")")" == "batcat" ]]; then
+      log_debug "[$id] bat 软链指向 batcat：$batcat_link"
+    else
+      log_error "[$id] bat 软链指向异常（应为 batcat）：$batcat_link -> $(readlink -- "$batcat_link")"
+      rc=1
+    fi
+  elif cmd_exists bat; then
+    log_debug "[$id] 已有 bat 命令，无需软链"
+  else
+    log_warn "[$id] 缺少 bat 软链（bat/batcat 均不可用时属正常）：$batcat_link"
+  fi
+
   (( rc == 0 )) || return 1
   log_ok "[$id] 日志配置校验通过"
+}
+
+# status：drop-in / 别名块 / bat 软链 三者状态（只读）
+action_syslog_status() {
+  local id="$1" bashrc="$HOME/.bashrc" dropin="无" alias="无" link link_state="无"
+  sudo -n test -f "$_SYSLOG_DROPIN" 2>/dev/null && dropin="有"
+  [[ -f "$bashrc" ]] && file_contains "$bashrc" "$_SYSLOG_ALIAS_BEGIN" && alias="有"
+  link="$(_syslog_bat_link)"
+  [[ -L "$link" ]] && link_state="有"
+  printf '    %-22s %s\n' "$id" "drop-in=$dropin 别名=$alias 软链=$link_state"
 }

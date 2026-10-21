@@ -55,6 +55,7 @@ desc=配置 git 身份与代理
 
 - `type=package`：交给后端适配器（`apt` / `npm` / `snap`）。
 - `type=config`：交给配置动作脚本（`action=<名字>` → `engine/actions/<名字>.sh`），并用 `artifacts` 声明它写出的文件，供 `status` 与 `remove` 使用。
+- 字段值支持 `$VAR`、`${VAR}`、`${VAR:-默认值}` 展开（`desc` / `group` 是文案，不展开），例如 `packages=${CLAUDE_CODE_PKG:-@anthropic-ai/claude-code}`。
 
 字段校验在 `catalog_validate` 中完成：非法 id、未知字段、重复字段、非法的 backend/track、缺失的 packages/action、指向不存在工具的 `deps`，都会在加载阶段直接报错。
 
@@ -69,7 +70,7 @@ extends=minimal
 tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 ```
 
-- `tools` 支持三种写法：工具 id、`@分组`、`后端:包`（内联注册，无需改 catalog）。
+- `tools` 支持三种写法：工具 id、`@分组`、`后端:包`（内联注册，无需改 catalog）。内联 id 的规则（包名转小写、非法字符换 `-`、去掉首尾 `-`）在 CLI、引擎与 Web UI 三处保持一致。
 - `extends` 会先并入父清单的全部工具，再追加自己的（按顺序去重）。
 - 内置四份清单：`minimal` → `default` → `dev` 逐层扩展，`ai` 单独一套。
 
@@ -83,7 +84,7 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 | `verify` | 只校验，不修改 | 依赖优先 |
 | `status` | 展示当前状态 | 依赖优先 |
 
-`type=config` 的动作按约定实现 `action_<名字>_apply|remove|verify`（另有可选的 `_status`，缺失时回退为通用状态输出）。
+`type=config` 的动作按约定实现 `action_<名字>_apply|remove|verify|status` 四个动词（status 只读，输出一行摘要；缺失时才回退为通用状态输出）。
 
 ## 命令行参数
 
@@ -93,27 +94,36 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 | `--pick <a,b,@组,apt:jq>` | 临时指定选择 |
 | `--all` | 选择 catalog 中全部工具 |
 | `--list` | 列出 catalog 与 profile，然后退出 |
+| `--json` | 与 `--list` 连用，输出 JSON（供 Web UI 读取） |
 | `--dry-run` | 只打印计划，不写盘 |
 | `--force` | 忽略幂等判断，强制重做 |
 | `--keep-going` | 单项失败不中断，跑完再汇总 |
 | `--no-sudo` | 跳过需要提权的项 |
+| `--yes` | 非交互确认（自动回答 y） |
 | `--debug` | 调试日志 |
 
 `--profile`、`--pick`、`--all` **三选一**，同时给出会报错（退出码 2）。不加选择时默认 `--profile default`。
 
 ## 重要默认值
 
+配置写在 `config/user.env`（从 `config/user.env.example` 复制）；`config/versions.env` 放版本与 npm 源默认值。模板里列出的每个键都真的会被引擎读取。
+
 - `MIRROR_APT_URL` / `MIRROR_APT_PORTS_URL`：默认清华 TUNA；amd64 用前者，arm64/riscv64 等用 `-ports`。换源前会把原文件持久备份到 `state/actions/mirrors/`，因此 `remove mirrors` 可跨运行还原。
-- `PROXY_ENABLED=true`：默认写入 shell 与 Git 代理。`PROXY_HOST` 留空时取当前 IPv4 并把最后一段替换为 `1`，`PROXY_PORT` 留空时用 `7890`。写入前 ping 代理主机，验证阶段用 `curl -x` 真实访问 `PROXY_TEST_URL`。
-- `GIT_USER_NAME` / `GIT_USER_EMAIL`：任一为空则跳过对应项并给出 `git config --global` 提示。
-- `SSH_INSTALL_SERVER=false`：默认只装客户端；`SSH_KEY_TYPE=ed25519`。
-- `NODE_VERSION=`：留空时装 `NODE_LTS_MAJOR` 下的最新版本，填写完整版本则精确锁定。
+- `MIRROR_SKIP_APT=true`：不改写 APT 源（公司内网等已自备源的环境用）。
+- `MIRROR_SKIP_APT_UPDATE=true`：不执行 `apt update`（完全离线环境）。
+- `APT_UPGRADE=true`：换源并 `apt update` 之后追加一次系统全量 `apt-get upgrade`；跳过 `apt update` 时不执行。
+- `PROXY_ENABLED=true`：默认写入 shell 与 Git 代理。`PROXY_HOST` 留空时取当前 IPv4 并把最后一段替换为 `1`，`PROXY_PORT` 留空时用 `7890`。写入前 ping 代理主机，验证阶段用 `curl -x` 真实访问 `PROXY_TEST_URL`（默认 `https://github.com`），超时取 `PROXY_CONNECT_TIMEOUT`（默认 5s）与 `PROXY_MAX_TIME`（默认 15s）。`NO_PROXY` 默认 `localhost,127.0.0.1,::1`。
+- `GIT_USER_NAME` / `GIT_USER_EMAIL`：任一为空则跳过对应项并给出 `git config --global` 提示；`verify` 阶段会校验这两项是否与期望一致。
+- `SSH_KEY_TYPE=ed25519`：默认非交互生成 ed25519 密钥。SSH **服务端**不由本文件控制——`openssh-server` 是 catalog 条目，用 `--pick openssh-server` 或写进 profile 启用（旧配置里的 `SSH_INSTALL_SERVER` 已废弃，加载时会提示）。
+- `NODE_VERSION=`：留空时装 `NODE_LTS_MAJOR` 下的最新版本，填写完整版本则精确锁定。`NVM_VERSION` 指定 nvm 自身版本，`NPM_REGISTRY` 指定 npm 源。
+- `CLAUDE_CODE_PKG` / `CLAUDE_CODE_VERSION`：Claude Code 的 npm 包名与锁定版本；`CODEX_PKG` / `CODEX_VERSION` 与 `OPENCODE_PKG` / `OPENCODE_VERSION` 同理。默认值写在 `config/versions.env`，要临时换版本可在 Web UI 的对应工具参数里改。
 - `JOURNALD_MAX_USE=200M`：journald 持久化上限。
 
 ## 安全性与失败处理
 
 - 需要 sudo 时优先 `sudo -n`，交互终端则 `sudo -v`；非交互环境需预先准备凭据，或用 `--no-sudo` 跳过。
 - 受管文件改写前 `register_rollback`：原文件存在则备份、不存在则记录为新建；失败时统一回滚，临时文件一并清理。
+- 每个配置动作都满足 apply/remove 对称：apply 改了系统设置或用户配置（gsettings、npm config）会先记录原值，remove 按原值还原；apply 建的每个产物 verify 都会检查；没法完全还原时如实报 skipped 而不是成功。
 - 每次运行有独立日志，目录/文件权限收紧为 `700/600`，token、密码、Bearer Authorization、URL 凭据在落盘前脱敏。
 - apt/dpkg 操作前 `wait_for_apt_lock`；重试由 `with_retry` 统一处理。
 - npm 全局安装失败且输出含 `ENOTEMPTY` 时，只清理 `.<package>-*` 隐藏 rename 残留并重试一次，不动正式包目录。
@@ -129,10 +139,13 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 ./ui.sh --help
 ```
 
-- 依赖 `python3` >= 3.10，只用标准库；`--host` 仅接受 `127.0.0.1` 或 `localhost`。
+- 依赖 `python3` >= 3.10（启动时校验版本），只用标准库；`--host` 仅接受 `127.0.0.1` 或 `localhost`。
+- 顶栏「执行动词」下拉框覆盖引擎的五个动词：安装 / 更新 / 卸载 / 校验 / 状态；选「卸载」会先弹确认框。工具面板里的「卸载所选」仍按已安装清单逐项确认。
+- 「预览计划」按当前动词生成依赖闭包计划；只读动词（校验/状态）没有 dry-run 短路，预览一律改用安装动词生成，不会真的去跑校验。
 - 首次启动若需要 sudo，会先执行 `sudo -v` 预授权，之后每 50 秒刷新凭据；授权失败只让需要提权的动作不可用，不影响页面启动。
 - 每次启动生成一次性 token，终端打印 `http://127.0.0.1:<port>/?token=...`；未带 token 的请求一律返回 401。
 - 页面修改的参数写入 `config/ui.env`（权限 0600），优先级高于 `config/user.env`，不会覆盖 `user.env`；口令类字段不回显明文。字段旁的“恢复默认”会清除该项覆盖，删除 `config/ui.env` 可整体还原。
+- 参数面板按所选工具分组，覆盖 `config/user.env` 与 `config/versions.env` 里所有会被引擎读取的键（镜像源与换源开关、代理与超时、Git 身份、SSH 密钥、journald 限容、Node/nvm/npm、AI CLI 的包名与版本）。
 - 运行记录在 `state/ui/runs/<run_id>/`（`run.log`、`events.jsonl`、`meta.json`），服务日志在 `state/ui/server.log`；这些路径均被 `.gitignore` 忽略。
 - 安全边界：只绑定本机回环地址，无远程访问；token 经环境变量传给服务，不出现在进程参数中。
 
@@ -153,6 +166,8 @@ engine/
   lib/graph.sh           依赖闭包与拓扑/逆序
   lib/backends.sh        后端适配器（apt/npm/snap）
   lib/engine.sh          五动词编排器
+  lib/events.sh          结构化事件（JSONL，供 Web UI 实时日志）
+  lib/list_json.sh       catalog/profile 的 JSON 序列化
   lib/state.sh           state/manifest.conf 清单读写
   lib/rollback.sh        备份/回滚/临时文件
   lib/log.sh             终端 + 文件日志（脱敏）
@@ -168,10 +183,12 @@ logs/                    运行时日志（.gitignore 忽略）
 
 ```bash
 ./tests/run.sh            # Bash 回归用例，断言 catalog/profile/graph/state/rollback/后端/引擎/动作/Web UI
-./tests/run.sh graph      # 只跑名字匹配的用例
+./tests/run.sh graph      # 只跑显示名或用例函数名里含 graph 的用例
 python3 -m unittest discover -s tests -p 'test_*.py' -v   # Web UI 服务端用例
 node --test tests/test_app_js.js                          # 前端用例
 ```
+
+过滤条件匹配不到任何用例时返回非零，不会出现“跑了 0 个用例却显示通过”。
 
 测试全部在临时目录中进行：`HOME`、`STATE_DIR`、`PATH` 都被重定向，`apt-get`/`snap`/`npm`/`sudo`/`fuser`/`ping`/`ip` 均为 fake，不会改动宿主机 `/etc`。
 

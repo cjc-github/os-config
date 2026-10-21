@@ -97,7 +97,7 @@ desc=配置 git 身份与代理
 | `track` | 选填 | `latest`（默认）/ `pin` |
 | `version` | 选填 | `track=pin` 时使用 |
 | `deps` | 选填 | 空格分隔，必须指向已定义工具 |
-| `artifacts` | 选填 | 每行一个产物路径，支持 `$HOME` / `~` |
+| `artifacts` | 选填 | 空格分隔的产物路径，支持 `~` / `$VAR`；必须列全动作真正写出的文件，否则 `status` 与 Web UI 的产物清单会漏 |
 | `group` | 选填 | `@组名` 展开依据；内联注册的为 `adhoc` |
 | `desc` | 选填 | `--list` 展示 |
 | `sudo` | 选填 | config 类是否需要提权（package 类由 backend 推断） |
@@ -118,8 +118,8 @@ desc=配置 git 身份与代理
 
 ### 变量与产物展开
 
-- `catalog_expand_vars`：支持 `$VAR` / `${VAR}`，未定义变量展开为空，并保护位置参数 `$1`。
-- `catalog_expand_artifacts <id>`：展开变量并把行首 `~` 换算为 `$HOME`，每行输出一个路径。
+- `catalog_expand_vars`：支持 `$VAR` / `${VAR}` / `${VAR:-默认值}`（未定义或为空时取默认值）；未定义变量展开为空，并保护位置参数 `$1`。`desc` / `group` 是文案字段，不做展开。
+- `catalog_expand_artifacts <id>`：展开变量并把行首 `~` 换算为 `$HOME`，每行输出一个路径。artifacts **只在使用时展开一次**（catalog 加载时不展开），否则路径里再出现的 `$` 会被二次解释。
 
 ### 内联（adhoc）注册
 
@@ -135,6 +135,7 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 ```
 
 - `tools` token 三种形态：工具 id；`@分组`；`后端:包`（内联注册）。
+- 内联 id 的生成规则（`engine/lib/profile.sh`）：包名转小写 → 非 `[a-z0-9_-]` 字符换成 `-` → 去掉首尾所有 `-`。该规则必须与 `ui/schema.py` 的 `normalize_adhoc_id`、`ui/static/app.js` 的 `normalizeAdhocId` 完全一致，否则同一个 `--pick apt:xxx` 在 CLI 与 Web UI 会得到两个不同的 id。
 - `extends` 先并入父清单全部工具，再追加自身（按顺序去重，父在前）。
 - `profile_tokens <name>` 输出最终 token 流（每行一个，已展开 `extends`）。
 - `profile_resolve <tokens...>` 输出最终工具 id 列表：id 直接保留，`@组` 展开为同组全部 id，`后端:包` 内联注册后保留。
@@ -169,7 +170,7 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 | update | `_backend_<b>_update` | `action_<action>_apply` |
 | remove | `_backend_<b>_remove` | `action_<action>_remove` |
 | verify | `_backend_<b>_verify` | `action_<action>_verify` |
-| status | `_backend_<b>_status` | `action_<action>_status`，缺失则通用回退 |
+| status | `_backend_<b>_status` | `action_<action>_status`（7 个动作都已实现；缺失时才回退通用输出） |
 
 动作脚本在首次使用时才 source（`_engine_source_action`），同一动作只加载一次。
 
@@ -189,6 +190,28 @@ engine_run <verb> <id...>
 
 - 非 `--keep-going` 时首个失败即中断（由 trap 触发整体回滚）。
 - `--keep-going` 时继续跑完，最终仍返回非零；引擎本身不触发回滚。
+- 动作可以用返回码 `100` 表示「skipped」（例如 `nodejs` 卸载时用户拒绝、`syslog` 卸载时没有 sudo 权限），引擎会把它计入「跳过」而不是「成功」或「失败」。
+
+### remove 的依赖提示
+
+`graph_dependents` 只看得到本次闭包内的依赖者，因此 remove 前额外扫一遍完整 catalog：
+
+- 依赖本项、**且已经在选集里**的工具 → 提示「它们会先于本项删除」；
+- 依赖本项、**不在选集里但已经安装**的工具（config 类查 `state/manifest.conf`，package 类问后端 `_backend_<b>_is_installed`）→ 提示「卸载后可能失效，如需一并卸载请一起选上」。
+
+### Web UI 的动词映射
+
+Web UI 走的是同一套引擎命令（`setup.sh <动词> --pick ...`），五个动词全部可达：
+
+| UI | 命令 | 说明 |
+|---|---|---|
+| 安装 | `install` | 默认动词 |
+| 更新 | `update` | package 升到候选版本，config 重新 apply |
+| 卸载 | `remove` | 必须带确认，服务端拒绝没有 `confirm` 的请求 |
+| 校验 | `verify` | 只读 |
+| 状态 | `status` | 只读，输出各工具当前状态 |
+
+「预览计划」走 `--dry-run`。引擎只对写动词（install/update/remove）做 dry-run 短路，只读动词会真的执行，因此预览接口统一用写动词生成计划，避免在预览时触发 `curl -x` 之类的副作用。
 
 ### 写操作预判
 
@@ -212,7 +235,7 @@ engine_run <verb> <id...>
 ```text
 state_record <id> <action> [artifact...]     # install/update 后写入
 state_forget <id>                            # remove 后清除
-state_has <id> / state_artifacts <id> / state_list
+state_has <id> / state_artifacts <id>
 ```
 
 每次写运行开始 `state_snapshot` 把 `manifest.conf` 存到 `.manifest.run.bak`；成功或 `--keep-going` 时 `state_discard_snapshot` 丢弃，失败回滚时 `state_restore_snapshot` 还原，保证文件改动与清单改动一起回退（否则 status/remove 会依据残留清单去找已回滚的产物）。
@@ -233,17 +256,25 @@ apt/dpkg 前 `wait_for_apt_lock` 轮询 dpkg/apt 锁（默认最多 60s），失
 
 ## 十、配置动作
 
-约定：`engine/actions/<name>.sh` 提供 `action_<name>_apply <id>` / `_remove` / `_verify`（`_status` 可选），由引擎惰性 source。动作脚本**不加 `set -e`**，出错用返回值表达。
+约定：`engine/actions/<name>.sh` 提供 `action_<name>_apply <id>` / `_remove` / `_verify` / `_status` 四个动词，由引擎惰性 source。动作脚本**不加 `set -e`**，出错用返回值表达。`_status` 是只读的，输出与 package 类一致的一行摘要（如 `git  name=… email=… proxy=…`）。
 
 | 动作 | sudo | 关键行为 |
 |---|---:|---|
-| mirrors | 1 | 按架构选 archive/ports 镜像；改前把原源文件持久备份到 `state/actions/mirrors/`；remove 跨运行还原；改完 `apt update` |
-| proxy | 0 | 推导代理地址，ping 主机，写 shell/Git 代理；verify 用 `curl -x` 访问 `PROXY_TEST_URL` |
-| git | 1 | 写全局身份与代理，产物 `$HOME/.gitconfig`；身份为空则 warning 跳过 |
-| ssh | 0 | 生成 `$HOME/.ssh/id_<type>` 密钥（默认 ed25519） |
-| syslog | 1 | 写 journald drop-in 与限容配置；产物 `/etc/systemd/journald.conf.d/99-os-config.conf`、`$HOME/.bashrc` |
-| nosuspend | 0 | 关闭桌面息屏/自动锁屏 |
-| nodejs | 0 | nvm 安装 Node LTS，设 default，写 npm registry |
+| mirrors | 1 | 按架构选 archive/ports 镜像；改前把原源文件持久备份到 `state/actions/mirrors/`；remove 跨运行还原；改完 `apt update`（`MIRROR_SKIP_APT_UPDATE=true` 时跳过）；`MIRROR_SKIP_APT=true` 时不改写源；`APT_UPGRADE=true` 时追加全量 `apt-get upgrade` |
+| proxy | 0 | 推导代理地址，ping 主机，写 shell/Git 代理；verify 用 `curl -x` 访问 `PROXY_TEST_URL`，超时取 `PROXY_CONNECT_TIMEOUT` / `PROXY_MAX_TIME` |
+| git | 0 | 写全局身份与代理，产物 `$HOME/.gitconfig`；身份为空则 warning 跳过；verify 校验 `user.name`/`user.email` 与代理键；remove 只还原代理键，**保留身份**（有意为之） |
+| ssh | 0 | 生成 `$HOME/.ssh/id_<type>` 密钥（默认 ed25519）；remove 只删本动作创建的密钥 |
+| syslog | 1 | 写 journald drop-in 与限容配置；产物 `/etc/systemd/journald.conf.d/99-os-config.conf`、`$HOME/.bashrc`、`$HOME/.local/bin/bat`；verify 三者都查；remove 时没有 sudo 也照样清理用户级残留（别名块、bat 软链），系统级部分返回 `100`（skipped） |
+| nosuspend | 0 | 关闭桌面息屏/自动锁屏；apply 记录 gsettings 原值到 `state/actions/nosuspend/`，remove **按原值还原**（没有记录才退回发行版默认） |
+| nodejs | 0 | nvm 安装 Node LTS，设 default，写 npm registry；apply 记录 npm 配置原值到 `state/actions/nodejs/npmrc.orig`，remove 删除 `~/.nvm` 并**按原值还原 npm 配置**（原本没有的键删掉）；verify 校验 node/npm 版本与 registry；remove 需确认，用户拒绝时返回 `100`（skipped） |
+
+### apply / remove / verify 的对称性
+
+每个动作都必须满足三条：
+
+1. **apply 写什么，remove 就还原什么**——写系统设置（gsettings）要记原值，写用户配置（npm config）要记原值；只删自己创建的东西，不动用户原有的。
+2. **apply 建的每个产物，verify 都要查**——例如 syslog 的 bat 软链、nodejs 的 npm registry。
+3. **remove 的结果要如实上报**——没能完全还原时返回 `100`（skipped）而不是 `0`，否则引擎会把它计成"成功"。
 
 ## 十一、备份与回滚
 
@@ -251,6 +282,11 @@ apt/dpkg 前 `wait_for_apt_lock` 轮询 dpkg/apt 锁（默认最多 60s），失
 
 1. 原文件存在 → 备份为 `.bak.<ts>.<pid>`，失败时恢复；
 2. 原文件不存在 → 记录为新建，失败时删除。
+
+两条硬约束：
+
+- `sudo` 模式下必须先确认 `sudo` 可用再判断文件是否存在。判断失败时**不能**当成“不存在”，否则回滚会把本该还原的文件删掉——此时直接中止注册并返回非零。
+- 只有真正登记成功才标记“已注册”。备份失败时不标记，允许重试，避免出现“有标记、无备份”的状态。
 
 `register_tmpfile` 登记临时文件，退出时统一清理。用户文件用普通 `cp/rm`，系统文件用 `sudo cp/rm`。`_ROLLBACK_DONE` 防止 trap 重复执行；`setup_traps` 安装 EXIT/ERR/signal 处理。
 
@@ -267,7 +303,9 @@ apt/dpkg 前 `wait_for_apt_lock` 轮询 dpkg/apt 锁（默认最多 60s），失
 
 `config/versions.env`（版本与 npm 源）与 `config/user.env`（本机参数）在 `util.sh` 被 source 时以 `set -a` 自动加载（幂等，`_USER_CONFIG_LOADED` 守卫）。`user.env` 已被 `.gitignore` 忽略。
 
-常用变量见 `config/user.env.example`，包括 `MIRROR_APT_URL`/`MIRROR_APT_PORTS_URL`、`PROXY_*`、`GIT_USER_*`、`SSH_*`、`JOURNALD_MAX_USE`；版本变量包括 `NVM_VERSION`、`NODE_LTS_MAJOR`、`NODE_VERSION`、`NPM_REGISTRY` 与各 AI CLI 的包名/版本。
+常用变量见 `config/user.env.example`，包括 `MIRROR_APT_URL`/`MIRROR_APT_PORTS_URL`/`MIRROR_SKIP_APT`/`MIRROR_SKIP_APT_UPDATE`/`APT_UPGRADE`、`PROXY_*`、`GIT_USER_*`、`SSH_*`、`JOURNALD_MAX_USE`；版本变量包括 `NVM_VERSION`、`NODE_LTS_MAJOR`、`NODE_VERSION`、`NPM_REGISTRY` 与各 AI CLI 的包名/版本。`config/user.env.example` 里列出的每个键都必须被引擎实际读取；不生效的键不进模板。
+
+SSH 服务端不再由布尔开关控制：`openssh-server` 是 catalog 里的普通条目，用 `--pick openssh-server` 或写进 profile 启用。旧配置里残留的 `SSH_INSTALL_SERVER` 会在加载时被明确提示已废弃（而不是静默忽略）。
 
 安全说明：`user.env` 是普通 shell 文件，`SSH_KEY_PASSPHRASE` 若填写即为明文。
 
@@ -275,12 +313,14 @@ apt/dpkg 前 `wait_for_apt_lock` 轮询 dpkg/apt 锁（默认最多 60s），失
 
 ```bash
 ./tests/run.sh          # 全部；打印 PASS/FAIL 与总计
-./tests/run.sh apt      # 只跑名字包含 apt 的用例
+./tests/run.sh apt      # 只跑显示名或用例函数名里包含 apt 的用例
 ```
+
+过滤条件匹配不到任何用例时返回非零，避免“跑了 0 个用例却显示通过”的假阳性。
 
 - 每个用例在 `( ... )` 子 shell 中运行，`HOME`/`STATE_DIR`/`STATE_FILE`/`LOG_FILE`/`PATH` 全部指向临时目录。
 - `sudo`/`fuser`/`ip`/`ping`/`apt-get`/`dpkg-query`/`dpkg`/`npm`/`node`/`snap`/`ssh-keygen`/`curl` 均为 fake，不会改动宿主机。
-- 覆盖：语法、真实 catalog 加载与关键字段、变量/artifacts 展开、非法输入拒绝、adhoc 幂等、profile 解析与继承、依赖闭包/逆序、state 权限、rollback 六种路径、util/IPv4/sudo、`with_retry`、代理推导、日志脱敏、semver/命令校验/后端分派、apt/npm/snap 五动词、引擎（install/remove/dry-run/no-sudo/失败/keep-going/status 回退/缺动作/未知动词）、动作脚本接口完整性、mirrors/nodejs/nosuspend/ssh 辅助函数、proxy 写入/幂等/重写/移除、`setup.sh` 入口参数。
+- 覆盖：语法、真实 catalog 加载与关键字段、变量/artifacts 展开（含 `${VAR:-默认值}`、desc 不展开、artifacts 只展开一次）、非法输入拒绝、adhoc 幂等、profile 解析与继承、依赖闭包/逆序、state 权限、rollback 六种路径（含 sudo 不可用不删文件、备份失败可重试）、util/IPv4/sudo、`with_retry`、代理推导、日志脱敏、semver/命令校验/后端分派、apt/npm/snap 五动词、引擎（install/update/remove/verify/status/dry-run/no-sudo/失败/keep-going/status 回退/缺动作/未知动词、remove 时提示选集外的已安装依赖方）、动作脚本接口完整性（apply/remove/verify/status 四动词齐备）、mirrors/nodejs/nosuspend/ssh 辅助函数、proxy 写入/幂等/重写/移除、nodejs 卸载被拒绝算 skipped 与卸载还原 npm 配置、nosuspend 按原值还原、syslog 无 sudo 仍清用户级残留与 verify 查 bat 软链、内联 id 去首尾短横、废弃配置键有提示、`setup.sh` 入口参数。
 
 ## 十五、扩展
 

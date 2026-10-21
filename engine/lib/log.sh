@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # engine/lib/log.sh —— 彩色终端输出 + 落盘日志（含脱敏）
-# 由 setup.sh / setup.ps1 侧最早 source；日志路径由 $LOG_FILE 注入。
+# 由 setup.sh 侧最早 source；日志路径由 $LOG_FILE 注入。
 # 本文件不应设置 set -e。
 
 # 颜色（非 TTY 时禁用）

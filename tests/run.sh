@@ -15,6 +15,7 @@ NODE_BIN="$(command -v node || true)"
 PASS=0
 FAIL=0
 FILTER="${1:-}"
+MATCHED=0
 
 # ---------------------------------------------------------------------------
 # 断言：每个断言记一行 PASS/FAIL 到 $TMPROOT/.results
@@ -57,9 +58,19 @@ assert_rc_eq() {
 # ---------------------------------------------------------------------------
 # 测试运行器：每个用例独立子 shell + 独立 TMPROOT
 # ---------------------------------------------------------------------------
+
+# 过滤：显示名与用例函数名任一命中即选中。
+# （README 与文档里给的是函数名，只按显示名过滤会静默跑出 0 个用例。）
+_test_filter_match() {
+  local name="$1" fn="$2"
+  [[ -z "$FILTER" ]] && return 0
+  [[ "$name" == *"$FILTER"* || "$fn" == *"$FILTER"* ]]
+}
+
 run_test() {
   local name="$1" fn="$2"
-  if [[ -n "$FILTER" && "$name" != *"$FILTER"* ]]; then return 0; fi
+  if ! _test_filter_match "$name" "$fn"; then return 0; fi
+  MATCHED=$((MATCHED + 1))
 
   local TMPROOT
   TMPROOT="$(mktemp -d)"
@@ -184,14 +195,51 @@ EOF
   cat >"$b/npm" <<'EOF'
 #!/usr/bin/env bash
 ver="${FAKE_NPM_VERSION:-1.2.3}"
+# 用户级 npmrc：真实 npm 也会把 `npm config set` 写到这里
+npmrc="${FAKE_NPMRC:-$HOME/.npmrc}"
+npmrc_get() {
+  [[ -f "$npmrc" ]] || return 0
+  local line
+  while IFS= read -r line; do
+    line="${line%%;*}"
+    [[ "$line" == "$1="* ]] && { printf '%s' "${line#*=}"; return 0; }
+  done <"$npmrc"
+}
+npmrc_set() {
+  local key="$1" val="$2" tmp="$npmrc.tmp" line
+  : >"$tmp"
+  if [[ -f "$npmrc" ]]; then
+    while IFS= read -r line; do
+      [[ "$line" == "$key="* ]] && continue
+      printf '%s\n' "$line" >>"$tmp"
+    done <"$npmrc"
+  fi
+  printf '%s=%s\n' "$key" "$val" >>"$tmp"
+  mv -f "$tmp" "$npmrc"
+}
+npmrc_del() {
+  local key="$1" tmp="$npmrc.tmp" line
+  [[ -f "$npmrc" ]] || return 0
+  : >"$tmp"
+  while IFS= read -r line; do
+    [[ "$line" == "$key="* ]] && continue
+    printf '%s\n' "$line" >>"$tmp"
+  done <"$npmrc"
+  mv -f "$tmp" "$npmrc"
+}
 case "${1:-}" in
   config)
-    if [[ "${2:-}" == get ]]; then
-      case "${3:-}" in
-        prefix) printf '%s\n' "$FAKE_NPM_PREFIX"; exit 0 ;;
-        registry) printf '%s\n' "${NPM_REGISTRY:-}"; exit 0 ;;
-      esac
-    fi
+    case "${2:-}" in
+      get)
+        case "${3:-}" in
+          prefix) printf '%s\n' "$FAKE_NPM_PREFIX"; exit 0 ;;
+          registry) printf '%s\n' "${NPM_REGISTRY:-}"; exit 0 ;;
+          userconfig) printf '%s\n' "$npmrc"; exit 0 ;;
+          *) npmrc_get "${3:-}"; exit 0 ;;
+        esac ;;
+      set) npmrc_set "${3:-}" "${4:-}"; exit 0 ;;
+      delete|rm) npmrc_del "${3:-}"; exit 0 ;;
+    esac
     exit 0 ;;
   install)
     last="${!#}"; spec="${last%@*}"; base="${spec##*/}"
@@ -349,6 +397,9 @@ test_catalog_real() {
   assert_eq xz-utils "${CAT_PACKAGES[xz]}" "xz packages"
   assert_eq ninja-build "${CAT_PACKAGES[ninja]}" "ninja packages"
   assert_eq build-essential "${CAT_PACKAGES[gcc]}" "gcc packages"
+  assert_eq '@anthropic-ai/claude-code' "${CAT_PACKAGES[claude]}" "claude 默认包名"
+  assert_eq '@openai/codex' "${CAT_PACKAGES[codex]}" "codex 默认包名"
+  assert_eq 'opencode-ai' "${CAT_PACKAGES[opencode]}" "opencode 默认包名"
 }
 
 test_catalog_expand_vars() {
@@ -359,10 +410,35 @@ test_catalog_expand_vars() {
 
 test_catalog_artifacts() {
   catalog_load "$ROOT/catalog" >/dev/null 2>&1
-  assert_eq "$HOME/.gitconfig" "$(catalog_expand_artifacts git)" "git artifacts"
+  assert_eq "$HOME/.gitconfig
+$HOME/.config/git/config" "$(catalog_expand_artifacts git)" "git artifacts"
   assert_eq "/etc/systemd/journald.conf.d/99-os-config.conf
-$HOME/.bashrc" "$(catalog_expand_artifacts syslog)" "syslog artifacts"
+$HOME/.bashrc
+$HOME/.local/bin/bat" "$(catalog_expand_artifacts syslog)" "syslog artifacts"
+  assert_eq "/etc/apt/sources.list.d/ubuntu.sources
+/etc/apt/sources.list" "$(catalog_expand_artifacts mirrors)" "mirrors artifacts"
+  assert_eq "$HOME/.nvm
+$HOME/.npmrc" "$(catalog_expand_artifacts nodejs)" "nodejs artifacts"
   assert_eq "" "$(catalog_expand_artifacts nosuspend)" "nosuspend 无 artifacts"
+}
+
+# artifacts 只展开一次：值里再出现 $ 不能被二次解释
+test_catalog_artifacts_expanded_once() {
+  local d
+  d="$(mktemp -d)"
+  cat >"$d/x.catalog" <<'EOF'
+[foo]
+type=config
+action=git
+artifacts=$ARTIFACT_ONE $ARTIFACT_TWO
+EOF
+  export ARTIFACT_ONE='$NOPE_UNSET_VAR'
+  export ARTIFACT_TWO='plain'
+  catalog_load "$d" >/dev/null 2>&1
+  assert_eq '$NOPE_UNSET_VAR
+plain' "$(catalog_expand_artifacts foo)" "artifacts 只展开一次"
+  unset ARTIFACT_ONE ARTIFACT_TWO
+  rm -rf "$d"
 }
 
 test_catalog_reject() {
@@ -1572,6 +1648,430 @@ test_action_proxy() {
 }
 
 # ===========================================================================
+# 10.5 配置项接线 / 回滚健壮性
+# ===========================================================================
+
+# PROXY_TEST_URL / PROXY_CONNECT_TIMEOUT / PROXY_MAX_TIME 必须真正生效
+test_proxy_verify_uses_configured_url_and_timeouts() {
+  . "$ROOT/engine/actions/proxy.sh"
+  local fakebin marker rc
+  fakebin="$TMPROOT/curlrec"
+  mkdir -p "$fakebin"
+  marker="$TESTDIR/curl.args"
+  cat >"$fakebin/curl" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$marker"
+exit 0
+EOF
+  chmod +x "$fakebin/curl"
+
+  PROXY_ENABLED=true PROXY_HOST=127.0.0.1 PROXY_PORT=7890 \
+    action_proxy_apply proxy >/dev/null 2>&1
+
+  PATH="$fakebin:$PATH" PROXY_ENABLED=true PROXY_HOST=127.0.0.1 PROXY_PORT=7890 \
+    PROXY_TEST_URL=https://example.test/probe \
+    PROXY_CONNECT_TIMEOUT=9 PROXY_MAX_TIME=21 \
+    action_proxy_verify proxy >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "自定义 TEST_URL 时 verify 通过"
+  assert_contains "$(cat "$marker" 2>/dev/null)" "https://example.test/probe" "verify 使用 PROXY_TEST_URL"
+  assert_contains "$(cat "$marker" 2>/dev/null)" "--connect-timeout 9" "verify 使用 PROXY_CONNECT_TIMEOUT"
+  assert_contains "$(cat "$marker" 2>/dev/null)" "--max-time 21" "verify 使用 PROXY_MAX_TIME"
+
+  # 留空时回落到默认值
+  PATH="$fakebin:$PATH" PROXY_ENABLED=true PROXY_HOST=127.0.0.1 PROXY_PORT=7890 \
+    PROXY_TEST_URL= PROXY_CONNECT_TIMEOUT= PROXY_MAX_TIME= \
+    action_proxy_verify proxy >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "默认值时 verify 通过"
+  assert_contains "$(cat "$marker" 2>/dev/null)" "https://github.com" "默认 TEST_URL 为 github.com"
+  assert_contains "$(cat "$marker" 2>/dev/null)" "--connect-timeout 5" "默认连接超时 5 秒"
+  assert_contains "$(cat "$marker" 2>/dev/null)" "--max-time 15" "默认整体超时 15 秒"
+}
+
+# MIRROR_SKIP_APT / MIRROR_SKIP_APT_UPDATE / APT_UPGRADE 必须真正生效
+test_mirrors_skip_and_upgrade_flags() {
+  . "$ROOT/engine/actions/mirrors.sh"
+  local src="$TESTDIR/ubuntu.sources" rc
+  printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble\n' >"$src"
+  _mirrors_sources() { printf '%s\n' "$src"; }
+
+  MIRROR_SKIP_APT=true action_mirrors_apply mirrors >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "MIRROR_SKIP_APT 时 apply 返回 0"
+  assert_contains "$(cat "$src")" "archive.ubuntu.com" "MIRROR_SKIP_APT 时不改写 APT 源"
+
+  : >"$FAKE_APT_LOG"
+  MIRROR_SKIP_APT=true MIRROR_SKIP_APT_UPDATE=true \
+    action_mirrors_apply mirrors >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "MIRROR_SKIP_APT_UPDATE 时 apply 返回 0"
+  assert_eq "" "$(cat "$FAKE_APT_LOG")" "MIRROR_SKIP_APT_UPDATE 时不执行 apt update"
+
+  : >"$FAKE_APT_LOG"
+  MIRROR_SKIP_APT=true APT_UPGRADE=true \
+    action_mirrors_apply mirrors >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "APT_UPGRADE 时 apply 返回 0"
+  assert_contains "$(cat "$FAKE_APT_LOG")" "update" "APT_UPGRADE 前先执行 apt update"
+  assert_contains "$(cat "$FAKE_APT_LOG")" "upgrade" "APT_UPGRADE=true 执行 apt-get upgrade"
+
+  : >"$FAKE_APT_LOG"
+  MIRROR_SKIP_APT=true MIRROR_SKIP_APT_UPDATE=true APT_UPGRADE=true \
+    action_mirrors_apply mirrors >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "跳过 update 时 apply 返回 0"
+  assert_not_contains "$(cat "$FAKE_APT_LOG")" "upgrade" "跳过 apt update 时不执行 upgrade"
+
+  : >"$FAKE_APT_LOG"
+  MIRROR_SKIP_APT=true action_mirrors_apply mirrors >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "默认 apply 返回 0"
+  assert_not_contains "$(cat "$FAKE_APT_LOG")" "upgrade" "默认不执行 apt-get upgrade"
+}
+
+# catalog 支持 ${VAR:-默认值}，且 desc 不做变量展开
+test_catalog_expand_vars_default_value() {
+  TESTVAR=hello
+  assert_eq 'fallback' "$(catalog_expand_vars '${NOPE_UNSET_VAR:-fallback}')" "未定义变量使用默认值"
+  assert_eq 'hello' "$(catalog_expand_vars '${TESTVAR:-fallback}')" "已定义变量优先于默认值"
+  TESTVAR=''
+  assert_eq 'fallback' "$(catalog_expand_vars '${TESTVAR:-fallback}')" "空变量使用默认值"
+  TESTVAR=world
+  assert_eq 'a-world-b' "$(catalog_expand_vars 'a-$TESTVAR-b')" "变量可嵌在文本中"
+}
+
+test_catalog_desc_not_expanded() {
+  local d
+  d="$(mktemp -d)"
+  cat >"$d/x.catalog" <<'EOF'
+[foo]
+type=package
+backend=apt
+packages=foo
+desc=价格 $USD 每月
+EOF
+  catalog_load "$d" >/dev/null 2>&1
+  assert_eq '价格 $USD 每月' "${CAT_DESC[foo]}" "desc 不做变量展开"
+  rm -rf "$d"
+}
+
+# npm 包名可由 versions.env 覆盖（默认值的断言放在 test_catalog_real，避免重复加载 catalog）
+test_catalog_pkg_name_from_env() {
+  export CLAUDE_CODE_PKG='@custom/claude' CODEX_PKG='@custom/codex' OPENCODE_PKG='custom-opencode'
+  catalog_load "$ROOT/catalog" >/dev/null 2>&1
+  assert_eq '@custom/claude' "${CAT_PACKAGES[claude]}" "包名可由 CLAUDE_CODE_PKG 覆盖"
+  assert_eq '@custom/codex' "${CAT_PACKAGES[codex]}" "包名可由 CODEX_PKG 覆盖"
+  assert_eq 'custom-opencode' "${CAT_PACKAGES[opencode]}" "包名可由 OPENCODE_PKG 覆盖"
+  unset CLAUDE_CODE_PKG CODEX_PKG OPENCODE_PKG
+}
+
+# git verify 必须校验 user.name / user.email
+test_action_git_verify_checks_identity() {
+  . "$ROOT/engine/actions/git.sh"
+  local cfg="$HOME/.gitconfig" rc
+
+  printf '[user]\n\tname = Wrong\n\temail = wrong@example.com\n' >"$cfg"
+  PROXY_ENABLED=false GIT_USER_NAME='Expected' GIT_USER_EMAIL='expected@example.com' \
+    action_git_verify git >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "user.name 不匹配时 verify 返回非零"
+
+  printf '[user]\n\tname = Expected\n\temail = expected@example.com\n' >"$cfg"
+  PROXY_ENABLED=false GIT_USER_NAME='Expected' GIT_USER_EMAIL='expected@example.com' \
+    action_git_verify git >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "身份匹配时 verify 返回 0"
+
+  # 未配置期望值时跳过身份校验（apply 本就跳过该项）
+  printf '[user]\n\tname = Whatever\n' >"$cfg"
+  PROXY_ENABLED=false GIT_USER_NAME='' GIT_USER_EMAIL='' \
+    action_git_verify git >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "未配置身份期望值时 verify 通过"
+}
+
+# sudo 不可用时不得把文件当成「新建」而在回滚时删掉
+test_rollback_sudo_unavailable_keeps_file() {
+  local fakebin f rc
+  fakebin="$TMPROOT/sudofail"
+  mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$fakebin/sudo"
+  chmod +x "$fakebin/sudo"
+
+  f="$TESTDIR/sudo-target"
+  printf 'original\n' >"$f"
+
+  PATH="$fakebin:$PATH" register_rollback "$f" sudo; rc=$?
+  assert_ne 0 "$rc" "sudo 不可用时注册回滚失败"
+  assert_eq 0 "${#_ROLLBACK_ORIG[@]}" "sudo 不可用时不登记回滚项"
+
+  printf 'changed\n' >"$f"
+  rollback_on_exit 1
+  assert_file_exists "$f" "sudo 不可用时回滚不删除文件"
+  assert_eq 'changed' "$(cat "$f")" "sudo 不可用时回滚不改动文件内容"
+}
+
+# 备份失败时必须允许重试（旧实现会因已标记而永久跳过）
+test_rollback_backup_failure_allows_retry() {
+  local fakebin f real_cp rc
+  fakebin="$TMPROOT/cpfail2"
+  mkdir -p "$fakebin"
+  real_cp="$(command -v cp)"
+  cat >"$fakebin/cp" <<EOF
+#!/usr/bin/env bash
+dest="\${!#}"
+case "\$dest" in *.bak.*) exit 1 ;; esac
+exec "$real_cp" "\$@"
+EOF
+  chmod +x "$fakebin/cp"
+
+  f="$TESTDIR/retry-target"
+  printf 'original\n' >"$f"
+
+  PATH="$fakebin:$PATH" register_rollback "$f"; rc=$?
+  assert_ne 0 "$rc" "备份失败时注册返回非零"
+  assert_eq 0 "${#_ROLLBACK_ORIG[@]}" "备份失败时不登记回滚项"
+
+  register_rollback "$f"; rc=$?
+  assert_rc_eq 0 "$rc" "备份恢复后可重试注册"
+  assert_eq 1 "${#_ROLLBACK_ORIG[@]}" "重试后登记了回滚项"
+
+  printf 'changed\n' >"$f"
+  rollback_on_exit 1
+  assert_eq 'original' "$(cat "$f")" "回滚恢复原内容"
+}
+
+# 过滤既匹配显示名也匹配用例函数名
+test_filter_matches_function_name() {
+  local rc
+  FILTER=graph _test_filter_match '依赖闭包' test_graph_closure; rc=$?
+  assert_rc_eq 0 "$rc" "过滤命中函数名"
+  FILTER=graph _test_filter_match '毫不相干的用例' test_graph_closure; rc=$?
+  assert_rc_eq 0 "$rc" "过滤按函数名命中"
+  FILTER=graph _test_filter_match '毫不相干的用例' test_something_else; rc=$?
+  assert_rc_eq 1 "$rc" "过滤未命中时返回非零"
+  FILTER='' _test_filter_match '任意用例' test_any; rc=$?
+  assert_rc_eq 0 "$rc" "无过滤条件时全部命中"
+}
+
+test_filter_no_match_exits_nonzero() {
+  local rc
+  bash "$ROOT/tests/run.sh" '__不存在的用例__' >/dev/null 2>&1; rc=$?
+  assert_ne 0 "$rc" "过滤无匹配用例时返回非零（避免静默假通过）"
+}
+
+# 废弃的配置键要明确提示，不能静默忽略
+test_deprecated_config_warns() {
+  local out
+  out=$(SSH_INSTALL_SERVER=true bash -c '
+    PROJECT_DIR="$1"
+    export PROJECT_DIR
+    . "$1/engine/lib/log.sh"
+    . "$1/engine/lib/util.sh"
+  ' _ "$ROOT" 2>&1)
+  assert_contains "$out" "SSH_INSTALL_SERVER 已废弃" "加载配置时提示废弃键"
+  assert_contains "$out" "openssh-server" "提示里给出替代做法"
+
+  out=$(SSH_INSTALL_SERVER=true _warn_deprecated_config 2>&1)
+  assert_contains "$out" "SSH_INSTALL_SERVER 已废弃" "直接调用也提示"
+  unset SSH_INSTALL_SERVER
+  out=$(_warn_deprecated_config 2>&1)
+  assert_not_contains "$out" "SSH_INSTALL_SERVER" "没有废弃键时不提示"
+}
+
+# 每个动作都要实现专属 status（不再落到通用兜底）
+test_actions_have_status() {
+  local a
+  for a in mirrors proxy git ssh syslog nosuspend nodejs; do
+    . "$ROOT/engine/actions/$a.sh"
+    assert_true "action_${a}_status 已实现" declare -F "action_${a}_status"
+  done
+}
+
+# status 动词要走专属实现，输出可读的一行状态
+test_engine_status_uses_action_status() {
+  catalog_reset
+  register_config_tool testfake testfake
+  _install_testfake_actions
+  _ACTION_SOURCED[testfake]=1
+  action_testfake_status() { printf '    %-22s %s\n' testfake "专属状态"; }
+  local out rc
+  out=$(engine_run status testfake 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "status 返回 0"
+  assert_contains "$out" "专属状态" "走专属 status 实现"
+  assert_not_contains "$out" "config:testfake" "不再落到通用兜底"
+}
+
+# 各动作的 status 只读且不报错
+test_action_status_outputs() {
+  local a out
+  for a in mirrors proxy git ssh syslog nosuspend nodejs; do
+    . "$ROOT/engine/actions/$a.sh"
+    out="$(action_${a}_status probe 2>&1)"
+    assert_contains "$out" "probe" "$a 的 status 输出包含工具 id"
+  done
+}
+
+# engine 的 update / verify 动词
+test_engine_update_and_verify_verbs() {
+  catalog_reset
+  register_config_tool testfake testfake
+  _install_testfake_actions
+  local rc
+  engine_run update testfake >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "engine update 返回 0"
+  assert_contains "$(cat "$TESTDIR/marker" 2>/dev/null || true)" applied "update 落到 apply 动作"
+  engine_run verify testfake >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "engine verify 返回 0"
+  assert_contains "$(cat "$TESTDIR/marker" 2>/dev/null || true)" verified "verify 调用 verify 动作"
+}
+
+# nodejs 卸载被用户拒绝时必须是 skipped，不能算成功
+test_action_nodejs_remove_declined_is_skipped() {
+  . "$ROOT/engine/actions/nodejs.sh"
+  mkdir -p "$HOME/.nvm"
+  local rc
+  # 非交互下 confirm 读不到输入即视为拒绝
+  action_nodejs_remove nodejs >/dev/null 2>&1; rc=$?
+  assert_rc_eq 100 "$rc" "用户拒绝卸载时返回 skipped(100)"
+  assert_true "用户拒绝时保留 ~/.nvm" test -d "$HOME/.nvm"
+
+  FORCE=1 action_nodejs_remove nodejs >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "--force 强制卸载返回 0"
+  assert_true "--force 时删除 ~/.nvm" test ! -d "$HOME/.nvm"
+}
+
+# nodejs apply 改了 npm 配置，remove 必须按原值还原（原本没有的删掉）
+test_action_nodejs_remove_restores_npm_config() {
+  . "$ROOT/engine/actions/nodejs.sh"
+  local dir rc
+  dir="$(state_action_dir nodejs)"
+  printf 'registry=https://old.example\n' >"$HOME/.npmrc"
+
+  # 模拟 apply 记下的原值
+  printf 'registry=https://old.example\n' >"$dir/npmrc.orig"
+  printf 'audit=\n' >>"$dir/npmrc.orig"
+
+  mkdir -p "$HOME/.nvm"
+  FORCE=1 action_nodejs_remove nodejs >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "remove 返回 0"
+  assert_contains "$(cat "$HOME/.npmrc")" "registry=https://old.example" "registry 还原为原值"
+  assert_not_contains "$(cat "$HOME/.npmrc")" "audit=" "原本没有的 audit 键被删除"
+  assert_file_missing "$dir/npmrc.orig" "还原后清掉原值记录"
+}
+
+# nosuspend：remove 必须还原用户原值，而不是发行版默认
+test_action_nosuspend_restores_original_values() {
+  . "$ROOT/engine/actions/nosuspend.sh"
+  local fakebin rc store="$TESTDIR/gsettings.db"
+  fakebin="$TMPROOT/gnomebin"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/gsettings" <<EOF
+#!/usr/bin/env bash
+store="$store"
+declare -A cur=(
+  [org.gnome.desktop.session idle-delay]="600"
+  [org.gnome.desktop.screensaver lock-enabled]="true"
+  [org.gnome.desktop.screensaver idle-delay]="900"
+)
+sub="\$1"; key="\$2 \$3"
+if [[ "\$sub" == "get" ]]; then
+  v="\${cur[\$key]:-0}"
+  [[ "\$key" == *"idle-delay" ]] && v="uint32 \$v"
+  printf '%s\n' "\$v"
+  exit 0
+fi
+if [[ "\$sub" == "set" ]]; then
+  printf '%s=%s\n' "\$key" "\$4" >>"$store"
+  exit 0
+fi
+if [[ "\$sub" == "reset" ]]; then
+  printf '%s=RESET\n' "\$key" >>"$store"
+  exit 0
+fi
+exit 0
+EOF
+  chmod +x "$fakebin/gsettings"
+
+  export XDG_CURRENT_DESKTOP=GNOME DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/fake
+  PATH="$fakebin:$PATH" action_nosuspend_apply nosuspend >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "apply 返回 0"
+  assert_true "apply 记录了原值" test -f "$(state_action_dir nosuspend)/gsettings.orig"
+  assert_contains "$(cat "$(state_action_dir nosuspend)/gsettings.orig")" "session-idle-delay=600" "记录了 session idle-delay 原值"
+
+  PATH="$fakebin:$PATH" action_nosuspend_remove nosuspend >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "remove 返回 0"
+  local applied
+  applied="$(cat "$store")"
+  assert_contains "$applied" "org.gnome.desktop.session idle-delay=600" "按原值还原 idle-delay"
+  assert_contains "$applied" "org.gnome.desktop.screensaver lock-enabled=true" "按原值还原 lock-enabled"
+  assert_contains "$applied" "org.gnome.desktop.screensaver idle-delay=900" "按原值还原 screensaver idle-delay"
+  assert_not_contains "$applied" "RESET" "有原值记录时不使用 gsettings reset"
+  unset XDG_CURRENT_DESKTOP DBUS_SESSION_BUS_ADDRESS
+}
+
+# syslog verify 必须检查自己创建的 bat 软链
+test_action_syslog_verify_checks_bat_link() {
+  . "$ROOT/engine/actions/syslog.sh"
+  local link="$HOME/.local/bin/bat" rc out
+  _SYSLOG_DROPIN="$TESTDIR/journald.conf"
+  printf '[Journal]\nStorage=persistent\nSystemMaxUse=200M\n' >"$_SYSLOG_DROPIN"
+  printf '%s\noslogs\n%s\n' "$_SYSLOG_ALIAS_BEGIN" "$_SYSLOG_ALIAS_END" >"$HOME/.bashrc"
+  mkdir -p "$(dirname "$link")"
+
+  # 软链指向别处 → verify 必须报出来
+  ln -sfn /opt/custom/bat "$link"
+  out=$(action_syslog_verify syslog 2>&1); rc=$?
+  assert_ne 0 "$rc" "bat 软链指向异常时 verify 返回非零"
+  assert_contains "$out" "bat 软链指向异常" "verify 报出软链异常"
+
+  # 指向 batcat → 通过
+  ln -sfn "$TESTDIR/bin/batcat" "$link"
+  out=$(action_syslog_verify syslog 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "软链指向 batcat 时 verify 通过"
+}
+
+# syslog 卸载：没有 sudo 也要清理用户级残留
+test_action_syslog_remove_without_sudo_cleans_user_files() {
+  . "$ROOT/engine/actions/syslog.sh"
+  local fakebin bashrc="$HOME/.bashrc" rc
+  fakebin="$TMPROOT/nosudo"
+  mkdir -p "$fakebin"
+  # sudo 一律失败：模拟没有提权凭据的环境
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$fakebin/sudo"
+  chmod +x "$fakebin/sudo"
+
+  printf '%s\noslogs 别名\n%s\n' "$_SYSLOG_ALIAS_BEGIN" "$_SYSLOG_ALIAS_END" >"$bashrc"
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$(command -v batcat || echo /bin/batcat)" "$HOME/.local/bin/bat"
+
+  PATH="$fakebin:$PATH" action_syslog_remove syslog >/dev/null 2>&1; rc=$?
+  assert_rc_eq 100 "$rc" "无 sudo 时返回 skipped(100)"
+  assert_not_contains "$(cat "$bashrc" 2>/dev/null)" "$_SYSLOG_ALIAS_BEGIN" "无 sudo 时仍移除 oslogs 别名块"
+  assert_file_missing "$HOME/.local/bin/bat" "无 sudo 时仍移除 bat 软链"
+}
+
+# remove 时要提示「选集之外、但已安装」的依赖方
+test_engine_remove_warns_external_dependents() {
+  catalog_reset
+  register_pkg_tool git-cli apt git
+  register_config_tool git git
+  CAT_DEPS[git]="git-cli"
+  state_init
+  state_record git git "$HOME/.gitconfig"
+  local out rc
+  out=$(engine_run remove git-cli 2>&1); rc=$?
+  assert_rc_eq 0 "$rc" "remove 返回 0"
+  assert_contains "$out" "已安装的工具依赖本次卸载的项" "提示选集外的已安装依赖方"
+  assert_contains "$out" "git" "提示里包含依赖方 id"
+
+  # 未安装的依赖方不提示
+  state_forget git
+  out=$(engine_run remove git-cli 2>&1)
+  assert_not_contains "$out" "已安装的工具依赖本次卸载的项" "未安装的依赖方不提示"
+}
+
+# 内联工具 id：首尾的 '-' 要全部去掉（与 ui/schema.py 一致）
+test_profile_adhoc_id_strips_all_dashes() {
+  profile_reset
+  PROF_ORDER=(cli); PROF_DESC[cli]="inline"; PROF_EXTENDS[cli]=""; PROF_TOOLS[cli]="apt:x--"
+  profile_resolve cli >/dev/null 2>&1
+  assert_eq "x" "${SELECTED_TOOLS[0]:-}" "内联 id 去掉首尾所有 '-'"
+  assert_eq "scope-pkg" "$(bash "$ROOT/setup.sh" --pick 'npm:@scope/pkg' --dry-run 2>&1 | grep -o 'scope-pkg' | head -1)" "npm 作用域包的 id 与 Web UI 一致"
+}
+
+# ===========================================================================
 # 11. setup.sh 入口
 # ===========================================================================
 test_entry() {
@@ -1791,6 +2291,21 @@ EOF
   out=$(PATH="$crashbin:$PATH" timeout 20 bash "$ROOT/ui.sh" --no-open --port "$port" </dev/null 2>&1); rc=$?
   assert_rc_eq 3 "$rc" "服务崩溃时返回真实退出码"
   assert_contains "$out" "已启动" "崩溃前已打印访问地址"
+
+  # python3 版本过低时必须拒绝启动（服务端用了 3.10 才有的语法）
+  local oldbin
+  oldbin="$TESTDIR/oldpy"
+  mkdir -p "$oldbin"
+  port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+  cat >"$oldbin/python3" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-c" ]]; then printf '3.9\n'; exit 0; fi
+exit 0
+EOF
+  chmod +x "$oldbin/python3"
+  out=$(PATH="$oldbin:$PATH" timeout 10 bash "$ROOT/ui.sh" --no-open --port "$port" </dev/null 2>&1); rc=$?
+  assert_rc_eq 1 "$rc" "python3 版本过低返回 1"
+  assert_contains "$out" "python3 >= 3.10" "版本过低提示"
 }
 
 test_ui_ignores_and_docs() {
@@ -1902,6 +2417,7 @@ run_test 'setup run_end 事件'                           test_setup_run_end
 run_test '真实 catalog 加载与关键字段'                 test_catalog_real
 run_test 'catalog 变量展开'                            test_catalog_expand_vars
 run_test 'catalog artifacts 展开'                      test_catalog_artifacts
+run_test 'catalog artifacts 只展开一次'                test_catalog_artifacts_expanded_once
 run_test 'catalog 非法输入拒绝'                        test_catalog_reject
 run_test 'catalog adhoc 注册与幂等'                    test_catalog_adhoc
 run_test 'catalog adhoc 拒绝不安全包名'                test_catalog_adhoc_rejects_unsafe_spec
@@ -1976,6 +2492,33 @@ run_test 'ui.sh 启动器参数'                            test_ui_launcher
 run_test 'Web UI 忽略规则与文档'                       test_ui_ignores_and_docs
 run_test 'Web UI Python 单元测试'                      test_ui_python_suite
 run_test 'Web UI Node 前端测试'                        test_ui_node_suite
+run_test 'proxy verify 读取 TEST_URL 与超时配置'       test_proxy_verify_uses_configured_url_and_timeouts
+run_test 'mirrors 跳过/升级开关生效'                   test_mirrors_skip_and_upgrade_flags
+run_test 'catalog 变量默认值与 desc 不展开'            test_catalog_expand_vars_default_value
+run_test 'catalog desc 不做变量展开'                   test_catalog_desc_not_expanded
+run_test 'catalog 包名可由环境变量覆盖'                test_catalog_pkg_name_from_env
+run_test 'git verify 校验身份'                         test_action_git_verify_checks_identity
+run_test '回滚：sudo 不可用时不删文件'                 test_rollback_sudo_unavailable_keeps_file
+run_test '回滚：备份失败后可重试'                      test_rollback_backup_failure_allows_retry
+run_test '测试过滤命中函数名'                          test_filter_matches_function_name
+run_test '测试过滤无匹配时返回非零'                    test_filter_no_match_exits_nonzero
+run_test '引擎 update/verify 动词'                     test_engine_update_and_verify_verbs
+run_test 'nodejs 卸载被拒绝时算 skipped'                test_action_nodejs_remove_declined_is_skipped
+run_test 'nodejs 卸载还原 npm 配置'                     test_action_nodejs_remove_restores_npm_config
+run_test 'nosuspend 还原用户原值'                      test_action_nosuspend_restores_original_values
+run_test 'syslog verify 检查 bat 软链'                  test_action_syslog_verify_checks_bat_link
+run_test 'syslog 无 sudo 时仍清理用户级残留'            test_action_syslog_remove_without_sudo_cleans_user_files
+run_test 'remove 提示选集外的已安装依赖方'              test_engine_remove_warns_external_dependents
+run_test '内联工具 id 去首尾短横'                      test_profile_adhoc_id_strips_all_dashes
+run_test '废弃配置键有明确提示'                        test_deprecated_config_warns
+run_test '每个动作都有专属 status'                     test_actions_have_status
+run_test 'status 走专属实现'                          test_engine_status_uses_action_status
+run_test '各动作 status 输出可读'                     test_action_status_outputs
+
+if [[ -n "$FILTER" && "$MATCHED" == 0 ]]; then
+  printf '没有用例匹配过滤条件：%s\n' "$FILTER" >&2
+  exit 1
+fi
 
 printf '\n总计：PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

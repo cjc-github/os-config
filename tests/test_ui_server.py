@@ -17,6 +17,23 @@ class AdhocTests(unittest.TestCase):
             with self.assertRaises(schema.ValidationError):
                 schema.normalize_adhoc_id(bad)
 
+    def test_id_strips_all_edge_dashes(self):
+        """id 规则必须与 engine/lib/profile.sh 一致：首尾的 '-' 全部去掉。"""
+        self.assertEqual(schema.normalize_adhoc_id("apt:x--"), ("x", "apt", "x--"))
+        self.assertEqual(schema.normalize_adhoc_id("apt:x-"), ("x", "apt", "x-"))
+        self.assertEqual(schema.normalize_adhoc_id("npm:@scope/pkg"),
+                         ("scope-pkg", "npm", "@scope/pkg"))
+        # 包名以 '-' 开头时两边都拒绝（引擎 _catalog_valid_pkg_spec 同样拒绝）
+        with self.assertRaises(schema.ValidationError):
+            schema.normalize_adhoc_id("apt:--x--")
+
+    def test_accepts_engine_pkg_chars(self):
+        """包名字符集必须与引擎的 _catalog_valid_pkg_spec 一致。"""
+        self.assertEqual(schema.normalize_adhoc_id("apt:pkg=1.2.3"),
+                         ("pkg-1-2-3", "apt", "pkg=1.2.3"))
+        self.assertEqual(schema.normalize_adhoc_id("npm:pkg~rc1"),
+                         ("pkg-rc1", "npm", "pkg~rc1"))
+
     def test_collision(self):
         with self.assertRaises(schema.ValidationError):
             schema.validate_pick(["apt:foo", "snap:foo"], {"git"})
@@ -38,10 +55,15 @@ class AdhocTests(unittest.TestCase):
 class ParamTests(unittest.TestCase):
     def test_groups(self):
         groups = {g["id"]: g for g in schema.PARAM_GROUPS}
-        self.assertEqual(set(groups), {"mirrors", "proxy", "git", "ssh", "syslog", "nodejs"})
+        self.assertEqual(set(groups), {"mirrors", "proxy", "git", "ssh", "syslog",
+                                       "nodejs", "claude", "codex", "opencode"})
         self.assertEqual(groups["nodejs"]["tools"], ["nodejs"])
         self.assertEqual(groups["git"]["tools"], ["git"])
         self.assertIn("NPM_REGISTRY", {f["key"] for f in groups["nodejs"]["fields"]})
+        self.assertIn("NVM_VERSION", {f["key"] for f in groups["nodejs"]["fields"]})
+        for group, key in [("claude", "CLAUDE_CODE_PKG"), ("codex", "CODEX_PKG"),
+                           ("opencode", "OPENCODE_PKG")]:
+            self.assertIn(key, {f["key"] for f in groups[group]["fields"]})
 
     def test_whitelist(self):
         schema.validate_params({"GIT_USER_NAME": "A B"}, [])
@@ -273,6 +295,55 @@ class AuthTests(ServerFixture):
         for key in ["profiles", "running", "current", "sudo", "defaults"]:
             self.assertIn(key, d)
 
+    def test_state_includes_versions_env_defaults(self):
+        """versions.env 里的默认值也要出现在 UI 的默认值里（如 NPM_REGISTRY）。"""
+        cfg_dir = self.cfg.project_dir / "config"
+        cfg_dir.mkdir(exist_ok=True)
+        (cfg_dir / "versions.env").write_text(
+            "NPM_REGISTRY='https://registry.example'\nNODE_LTS_MAJOR=22\n")
+        (cfg_dir / "user.env").write_text("NODE_LTS_MAJOR=20\n")
+        code, _, body = self.get("/api/state", token="tok")
+        self.assertEqual(code, 200, body)
+        d = json.loads(body)
+        self.assertEqual(d["defaults"]["NPM_REGISTRY"], "https://registry.example")
+        self.assertEqual(d["params"]["NPM_REGISTRY"], "https://registry.example")
+        # user.env 覆盖 versions.env
+        self.assertEqual(d["defaults"]["NODE_LTS_MAJOR"], "20")
+        self.assertEqual(d["params"]["NODE_LTS_MAJOR"], "20")
+
+    def test_new_engine_backed_params_are_whitelisted(self):
+        """引擎已接线的参数必须在白名单里，且拒绝非法取值。"""
+        for key in ["MIRROR_SKIP_APT", "MIRROR_SKIP_APT_UPDATE", "APT_UPGRADE",
+                    "PROXY_TEST_URL", "PROXY_CONNECT_TIMEOUT", "PROXY_MAX_TIME",
+                    "NO_PROXY", "NVM_VERSION",
+                    "CLAUDE_CODE_PKG", "CLAUDE_CODE_VERSION",
+                    "CODEX_PKG", "CODEX_VERSION",
+                    "OPENCODE_PKG", "OPENCODE_VERSION"]:
+            self.assertIn(key, schema.PARAM_KEYS)
+        schema.validate_params({"APT_UPGRADE": "true", "MIRROR_SKIP_APT": ""}, [])
+        schema.validate_params({"PROXY_TEST_URL": "https://example.test/probe"}, [])
+        schema.validate_params({"PROXY_CONNECT_TIMEOUT": "9", "PROXY_MAX_TIME": "21"}, [])
+        schema.validate_params({"NO_PROXY": "localhost,127.0.0.1,::1"}, [])
+        schema.validate_params({"NVM_VERSION": "v0.40.1"}, [])
+        schema.validate_params({"CLAUDE_CODE_PKG": "@anthropic-ai/claude-code"}, [])
+        schema.validate_params({"CLAUDE_CODE_VERSION": "2.1.228"}, [])
+        schema.validate_params({"CODEX_PKG": "@openai/codex"}, [])
+        schema.validate_params({"CODEX_VERSION": "0.147.0"}, [])
+        schema.validate_params({"OPENCODE_PKG": "opencode-ai"}, [])
+        schema.validate_params({"OPENCODE_VERSION": "1.18.18"}, [])
+        schema.validate_params({"JOURNALD_MAX_USE": "200M"}, [])
+        for bad in [{"APT_UPGRADE": "1"}, {"MIRROR_SKIP_APT": "yes"},
+                    {"PROXY_CONNECT_TIMEOUT": "0"}, {"PROXY_MAX_TIME": "-1"},
+                    {"PROXY_CONNECT_TIMEOUT": "abc"},
+                    {"PROXY_TEST_URL": "file:///etc/passwd"},
+                    {"NO_PROXY": "a b"}, {"NVM_VERSION": "v0.40.1; rm -rf /"},
+                    {"CLAUDE_CODE_PKG": "pkg; rm -rf /"},
+                    {"CLAUDE_CODE_PKG": "pkg with space"},
+                    {"CLAUDE_CODE_VERSION": "1.0.0 && echo x"},
+                    {"JOURNALD_MAX_USE": "200MB"}, {"JOURNALD_MAX_USE": "0"}]:
+            with self.assertRaises(schema.ValidationError):
+                schema.validate_params(bad, [])
+
     def test_state_drops_stale_selection(self):
         """catalog 变更或文件被手工改坏后，陈旧条目不应再导致 run 校验失败。"""
         ui = self.cfg.state_dir / "ui"
@@ -327,6 +398,22 @@ class SelectionFallbackTests(unittest.TestCase):
             selection = server_mod.Handler._read_selection(holder, catalog)
         self.assertEqual(selection["tools"], ["git"])
         self.assertEqual(selection["adhoc"], [])
+
+    def test_catalog_index_splits_space_separated_deps(self):
+        """引擎把 deps 存成空格分隔，UI 必须按同样规则切分。"""
+        holder = mock.Mock()
+        holder._load_catalog = mock.Mock(return_value={
+            "catalog": [
+                {"id": "git", "deps": "alpha beta"},
+                {"id": "solo", "deps": ""},
+                {"id": "commas", "deps": "x,y"},
+            ],
+            "profiles": [],
+        })
+        _ids, deps = server_mod.Handler._catalog_index(holder)
+        self.assertEqual(deps["git"], ["alpha", "beta"])
+        self.assertEqual(deps["solo"], [])
+        self.assertEqual(deps["commas"], ["x", "y"])
 
 class PlanTimeoutTests(ServerFixture):
     @classmethod
@@ -402,9 +489,33 @@ class RunTests(ServerFixture):
         code, _ = self.post("/api/plan", {"verb": "install", "pick": ["apt:jq;rm"]})
         self.assertEqual(code, 400)
 
-    def test_run_rejects_update(self):
-        code, _ = self.post("/api/run", {"verb": "update", "pick": ["git"]})
+    def test_run_accepts_all_five_verbs(self):
+        """引擎的五个动词都要能从 Web UI 触发。"""
+        for verb in ["install", "update", "remove", "verify", "status"]:
+            body = {"verb": verb, "pick": ["git"]}
+            if verb == "remove":
+                body["confirm"] = True
+            code, resp = self.post("/api/run", body)
+            self.assertEqual(code, 202, f"{verb}: {resp}")
+            self.wait_idle()
+            args = (self.cfg.project_dir / "run-setup.sh.args").read_text(
+                encoding="utf-8").splitlines()
+            self.assertIn(verb, args, f"{verb} 未透传给 setup.sh")
+
+    def test_run_rejects_unknown_verb(self):
+        code, _ = self.post("/api/run", {"verb": "frobnicate", "pick": ["git"]})
         self.assertEqual(code, 400)
+
+    def test_plan_of_readonly_verb_uses_install_dry_run(self):
+        """只读动词没有 dry-run 短路，预览必须改用写动词，避免真的跑校验。"""
+        for verb in ["verify", "status"]:
+            code, body = self.post("/api/plan", {"verb": verb, "pick": ["git"]})
+            self.assertEqual(code, 200, body)
+            args = (self.cfg.project_dir / "run-setup.sh.args").read_text(
+                encoding="utf-8").splitlines()
+            self.assertIn("install", args)
+            self.assertIn("--dry-run", args)
+            self.assertNotIn(verb, args)
 
     def test_run_concurrent_409(self):
         code, body = self.post("/api/run", {"verb": "install", "pick": ["git"]})
@@ -708,6 +819,19 @@ class FrontendTests(unittest.TestCase):
         css = (root / "style.css").read_text(encoding="utf-8")
         for token in [".maintabs", ".maintab.is-active", ".plan-strip"]:
             self.assertIn(token, css)
+
+    def test_verb_selector_exposes_five_verbs(self):
+        """顶栏动词下拉框要能选到引擎的五个动词。"""
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="verb"', html)
+        block = html.split('id="verb"', 1)[1].split("</select>", 1)[0]
+        for verb in ["install", "update", "remove", "verify", "status"]:
+            self.assertIn(f'value="{verb}"', block)
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ["function selectedVerb()", "runRemoveWithConfirm(",
+                      "startRun(verb)", 'startRun("remove"']:
+            self.assertTrue(token in js, f"app.js 缺少 {token}")
 
     def test_fixed_scroll_and_per_tool_logs(self):
         root = Path(__file__).resolve().parents[1] / "ui" / "static"

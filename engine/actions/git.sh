@@ -140,14 +140,43 @@ action_git_verify() {
     return 1
   fi
 
+  # 身份校验：只有配置了期望值才校验（未配置时 apply 本就跳过该项）。
+  if [[ -n "${GIT_USER_NAME:-}" ]]; then
+    cur=$(git_cfg_get user.name || true)
+    if [[ "$cur" == "$GIT_USER_NAME" ]]; then
+      log_debug "[$id] user.name=$cur"
+    else
+      log_error "[$id] user.name 不匹配：${cur:-<空>} != $GIT_USER_NAME"
+      rc=1
+    fi
+  else
+    log_info "[$id] 未配置 GIT_USER_NAME，跳过 user.name 校验"
+  fi
+
+  if [[ -n "${GIT_USER_EMAIL:-}" ]]; then
+    cur=$(git_cfg_get user.email || true)
+    if [[ "$cur" == "$GIT_USER_EMAIL" ]]; then
+      log_debug "[$id] user.email=$cur"
+    else
+      log_error "[$id] user.email 不匹配：${cur:-<空>} != $GIT_USER_EMAIL"
+      rc=1
+    fi
+  else
+    log_info "[$id] 未配置 GIT_USER_EMAIL，跳过 user.email 校验"
+  fi
+
   : "${PROXY_ENABLED:=true}"
   if [[ "$PROXY_ENABLED" != true ]]; then
     log_ok "[$id] 代理未启用，跳过代理键校验"
+    (( rc == 0 )) || return 1
+    log_ok "[$id] git 配置校验通过"
     return 0
   fi
 
   if ! resolve_proxy_endpoint 2>/dev/null; then
     log_warn "[$id] 无法推导代理地址，跳过代理键校验"
+    (( rc == 0 )) || return 1
+    log_ok "[$id] git 配置校验通过"
     return 0
   fi
   for key in http.proxy https.proxy; do
@@ -161,4 +190,21 @@ action_git_verify() {
   done
   (( rc == 0 )) || return 1
   log_ok "[$id] git 配置校验通过"
+}
+
+# status：git 身份与代理键状态（只读）
+action_git_status() {
+  local id="$1" name email proxy=""
+  name="$(git_cfg_get user.name 2>/dev/null || true)"
+  email="$(git_cfg_get user.email 2>/dev/null || true)"
+  proxy="$(git_cfg_get http.proxy 2>/dev/null || true)"
+  if [[ -z "$name" && -z "$email" && -z "$proxy" ]]; then
+    printf '    %-22s %s\n' "$id" "未配置"
+    return 0
+  fi
+  local -a parts=()
+  [[ -n "$name" ]] && parts+=("name=$name")
+  [[ -n "$email" ]] && parts+=("email=$email")
+  [[ -n "$proxy" ]] && parts+=("proxy=$proxy")
+  printf '    %-22s %s\n' "$id" "${parts[*]}"
 }

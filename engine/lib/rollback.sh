@@ -24,6 +24,7 @@ cleanup_tmpfiles() {
 
 # register_rollback <file> [user|sudo]
 #   原文件存在：创建 .bak 备份，失败时恢复；不存在：记为“本次新建”，失败时删除。
+#   返回非 0 表示没有登记成功（调用方应中止该动作），此时不会留下“有标记无备份”的状态。
 register_rollback() {
   local f="$1" mode="${2:-user}" existed=0 bak=""
   [[ "$mode" == "user" || "$mode" == "sudo" ]] || {
@@ -35,9 +36,14 @@ register_rollback() {
     log_debug "已注册回滚，跳过重复备份：$f"
     return 0
   fi
-  _ROLLBACK_SEEN[$f]=1
   if [[ "$mode" == "sudo" ]]; then
-    sudo test -e "$f" && existed=1
+    # sudo 不可用时无法判断文件是否存在。若此时当成“不存在”，
+    # 回滚会把本该还原的文件删掉——宁可中止注册，也不能误删。
+    if ! sudo true >/dev/null 2>&1; then
+      log_error "sudo 不可用，无法确认 $f 是否存在；已中止回滚注册（避免回滚时误删该文件）"
+      return 1
+    fi
+    if sudo test -e "$f"; then existed=1; fi
   else
     [[ -e "$f" ]] && existed=1
   fi
@@ -56,12 +62,13 @@ register_rollback() {
     log_debug "已注册新文件回滚：$f"
   fi
 
+  # 只有真正登记成功才标记 seen：备份失败时必须允许重试。
+  _ROLLBACK_SEEN[$f]=1
   _ROLLBACK_ORIG+=("$f")
   _ROLLBACK_BACKUP+=("$bak")
   _ROLLBACK_MODE+=("$mode")
   _ROLLBACK_EXISTED+=("$existed")
 }
-backup_file() { register_rollback "$@"; }
 
 # 调用 state.sh 的清理函数（未加载该模块时静默跳过）
 _rollback_call() {

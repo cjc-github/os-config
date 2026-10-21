@@ -24,6 +24,8 @@ _PROXY_HOST_RE = re.compile(r"^(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:]+\])$")
 _JOURNALD_RE = re.compile(r"^[1-9][0-9]*[KMGTP]?$")
 _DIGITS_RE = re.compile(r"^[0-9]+$")
 _NODE_VERSION_RE = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+$")
+_PKG_NAME_RE = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9._+/@=-]*$")
+_VERSION_RE = re.compile(r"^v?[0-9A-Za-z][0-9A-Za-z.\-+]*$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _WHITESPACE_RE = re.compile(r"\s")
 
@@ -85,20 +87,69 @@ def _valid_node_version(value: str) -> bool:
     return value == "" or _NODE_VERSION_RE.fullmatch(value) is not None
 
 
+def _valid_switch(value: str) -> bool:
+    """空串=沿用引擎默认；否则只接受 true/false。"""
+    return value in ("", "true", "false")
+
+
+def _valid_seconds(value: str) -> bool:
+    """超时秒数：空串=沿用引擎默认；否则为正整数。"""
+    if value == "":
+        return True
+    if _DIGITS_RE.fullmatch(value) is None:
+        return False
+    return int(value) >= 1
+
+
+def _valid_noproxy(value: str) -> bool:
+    """NO_PROXY 是逗号分隔的主机列表，不允许空白与换行。"""
+    return value == "" or _WHITESPACE_RE.search(value) is None
+
+
+def _valid_pkg_name(value: str) -> bool:
+    """npm 包名：与引擎的 _catalog_valid_pkg_spec 同一套字符。"""
+    if value == "":
+        return True
+    if _CONTROL_RE.search(value) is not None or _WHITESPACE_RE.search(value) is not None:
+        return False
+    return _PKG_NAME_RE.fullmatch(value) is not None
+
+
+def _valid_version(value: str) -> bool:
+    """版本号或 dist-tag（如 2.1.228 / v0.40.1 / latest）。"""
+    if value == "":
+        return True
+    return _VERSION_RE.fullmatch(value) is not None
+
+
 _PARAM_VALIDATORS = {
     "MIRROR_APT_URL": _valid_url,
     "MIRROR_APT_PORTS_URL": _valid_url,
+    "MIRROR_SKIP_APT": _valid_switch,
+    "MIRROR_SKIP_APT_UPDATE": _valid_switch,
+    "APT_UPGRADE": _valid_switch,
     "NPM_REGISTRY": _valid_url,
-    "PROXY_ENABLED": lambda v: v in ("", "true", "false"),
+    "PROXY_ENABLED": _valid_switch,
     "PROXY_HOST": _valid_host,
     "PROXY_PORT": _valid_port,
+    "PROXY_TEST_URL": _valid_url,
+    "PROXY_CONNECT_TIMEOUT": _valid_seconds,
+    "PROXY_MAX_TIME": _valid_seconds,
+    "NO_PROXY": _valid_noproxy,
     "GIT_USER_NAME": _valid_name,
     "GIT_USER_EMAIL": _valid_email,
     "SSH_KEY_TYPE": _valid_key_type,
     "SSH_KEY_PASSPHRASE": _valid_passphrase,
     "JOURNALD_MAX_USE": _valid_journald,
+    "NVM_VERSION": _valid_version,
     "NODE_LTS_MAJOR": _valid_major,
     "NODE_VERSION": _valid_node_version,
+    "CLAUDE_CODE_PKG": _valid_pkg_name,
+    "CLAUDE_CODE_VERSION": _valid_version,
+    "CODEX_PKG": _valid_pkg_name,
+    "CODEX_VERSION": _valid_version,
+    "OPENCODE_PKG": _valid_pkg_name,
+    "OPENCODE_VERSION": _valid_version,
 }
 
 PARAM_SPECS: dict[str, dict] = {
@@ -130,6 +181,12 @@ PARAM_GROUPS: list[dict] = [
                    placeholder="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"),
             _field("MIRROR_APT_PORTS_URL", "APT 源（arm64 等）",
                    placeholder="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"),
+            _field("MIRROR_SKIP_APT", "跳过换源", type="select",
+                   options=["", "true", "false"]),
+            _field("MIRROR_SKIP_APT_UPDATE", "跳过 apt update", type="select",
+                   options=["", "true", "false"]),
+            _field("APT_UPGRADE", "换源后全量 upgrade", type="select",
+                   options=["", "true", "false"]),
         ],
     },
     {
@@ -141,6 +198,12 @@ PARAM_GROUPS: list[dict] = [
                    options=["", "true", "false"]),
             _field("PROXY_HOST", "代理主机", placeholder="留空自动探测"),
             _field("PROXY_PORT", "代理端口", placeholder="7890"),
+            _field("PROXY_TEST_URL", "连通性验证地址",
+                   placeholder="https://github.com"),
+            _field("PROXY_CONNECT_TIMEOUT", "连接超时（秒）", placeholder="5"),
+            _field("PROXY_MAX_TIME", "整体超时（秒）", placeholder="15"),
+            _field("NO_PROXY", "不走代理的主机",
+                   placeholder="localhost,127.0.0.1,::1"),
         ],
     },
     {
@@ -175,10 +238,39 @@ PARAM_GROUPS: list[dict] = [
         "title": "Node.js",
         "tools": ["nodejs"],
         "fields": [
+            _field("NVM_VERSION", "nvm 版本", placeholder="v0.40.1"),
             _field("NODE_LTS_MAJOR", "LTS 主版本", placeholder="22"),
             _field("NODE_VERSION", "指定版本", placeholder="v22.11.0"),
             _field("NPM_REGISTRY", "npm 源",
                    placeholder="https://registry.npmmirror.com"),
+        ],
+    },
+    {
+        "id": "claude",
+        "title": "Claude Code",
+        "tools": ["claude"],
+        "fields": [
+            _field("CLAUDE_CODE_PKG", "npm 包名",
+                   placeholder="@anthropic-ai/claude-code"),
+            _field("CLAUDE_CODE_VERSION", "锁定版本", placeholder="2.1.228"),
+        ],
+    },
+    {
+        "id": "codex",
+        "title": "Codex",
+        "tools": ["codex"],
+        "fields": [
+            _field("CODEX_PKG", "npm 包名", placeholder="@openai/codex"),
+            _field("CODEX_VERSION", "锁定版本", placeholder="0.147.0"),
+        ],
+    },
+    {
+        "id": "opencode",
+        "title": "OpenCode",
+        "tools": ["opencode"],
+        "fields": [
+            _field("OPENCODE_PKG", "npm 包名", placeholder="opencode-ai"),
+            _field("OPENCODE_VERSION", "锁定版本", placeholder="1.18.18"),
         ],
     },
 ]
@@ -188,14 +280,17 @@ PARAM_GROUPS: list[dict] = [
 # pick / adhoc 校验
 # ---------------------------------------------------------------------------
 _CATALOG_ID_RE = re.compile(r"^[a-z0-9_-]+$")
-_ADHOC_RE = re.compile(r"^(apt|npm|snap):([A-Za-z0-9@._+/-]+)$")
-_ADHOC_SPEC_RE = re.compile(r"^[A-Za-z0-9@._+/-]+$")
+# 内联工具的包名规则必须与引擎的 _catalog_valid_pkg_spec 一致：
+# 不得含空白、不得以 - 开头（避免参数注入）。
+_ADHOC_RE = re.compile(r"^(apt|npm|snap):([A-Za-z0-9@][A-Za-z0-9._+/@=:~-]*)$")
+_ADHOC_SPEC_RE = re.compile(r"^[A-Za-z0-9@][A-Za-z0-9._+/@=:~-]*$")
 
 
 def normalize_adhoc_id(token: str) -> tuple[str, str, str]:
     """把 ``backend:spec`` 转为 ``(id, backend, spec)``。
 
-    id 的生成规则与 ``engine/lib/profile.sh`` 保持一致。
+    id 的生成规则与 ``engine/lib/profile.sh`` 保持一致：
+    包名转小写、非 ``[a-z0-9_-]`` 字符换成 ``-``，再去掉首尾的 ``-``。
     """
     if not isinstance(token, str):
         raise ValidationError("内联工具标识必须是字符串")

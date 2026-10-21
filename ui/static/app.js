@@ -184,7 +184,9 @@ function statusLabel(status, phase) {
   return labels[status] || status || "未执行";
 }
 
-const ADHOC_RE = /^(apt|npm|snap):([A-Za-z0-9@._+/-]+)$/;
+// 与服务端 normalize_adhoc_id / 引擎 _catalog_valid_pkg_spec 保持一致：
+// 包名不得以 - 开头，不得含空白。
+const ADHOC_RE = /^(apt|npm|snap):([A-Za-z0-9@][A-Za-z0-9._+/@=:~-]*)$/;
 
 function validAdhocToken(token) {
   const match = ADHOC_RE.exec(String(token || "").trim());
@@ -341,6 +343,12 @@ function schedulePlan(delay) {
   S.planTimer = window.setTimeout(runPlan, delay === undefined ? 300 : delay);
 }
 
+// 顶栏下拉框里选中的动词（install / update / remove / verify / status）。
+function selectedVerb() {
+  const value = $("verb") ? $("verb").value : "install";
+  return ["install", "update", "remove", "verify", "status"].includes(value) ? value : "install";
+}
+
 async function runPlan() {
   if (isBusy()) return;
   const pick = Array.from(S.selection);
@@ -351,7 +359,7 @@ async function runPlan() {
   }
   const seq = ++S.planSeq;
   try {
-    const data = await api("POST", "/api/plan", { verb: "install", pick: pick });
+    const data = await api("POST", "/api/plan", { verb: selectedVerb(), pick: pick });
     if (seq !== S.planSeq) return;
     S.lastPlan = data;
     renderPlan(data);
@@ -1031,6 +1039,16 @@ function openModal() {
   $("confirm-cancel").focus();
 }
 
+// 统一的确认弹窗：确认后执行 onOk（一般是启动一次运行）。
+function openConfirmModal(text, onOk) {
+  $("confirm-text").textContent = text;
+  openModal();
+  $("confirm-ok").onclick = async () => {
+    closeModal();
+    await onOk();
+  };
+}
+
 function closeModal() {
   $("confirm-modal").hidden = true;
   if ($("app")) $("app").inert = false;
@@ -1051,12 +1069,18 @@ function openRemoveModal() {
       ? "（产物：" + entry.artifacts.join("、") + "）" : "";
     return id + artifacts;
   });
-  $("confirm-text").textContent = "将卸载：" + details.join("；") + "。该操作会删除已写入的配置，确认继续？";
-  openModal();
-  $("confirm-ok").onclick = async () => {
-    closeModal();
-    await startRun("remove", picked);
-  };
+  openConfirmModal("将卸载：" + details.join("；") + "。该操作会删除已写入的配置，确认继续？",
+    () => startRun("remove", picked));
+}
+
+// 顶栏动词选了 remove 时：用当前选中的工具走同一套确认弹窗。
+function runRemoveWithConfirm(pick) {
+  if (!pick.length) {
+    toast("请先选择工具", "warn");
+    return;
+  }
+  openConfirmModal("将卸载：" + pick.join("、") + "。该操作会删除已写入的配置，确认继续？",
+    () => startRun("remove", pick));
 }
 
 // ---------- 历史 ----------
@@ -1262,7 +1286,15 @@ function wireEvents() {
   });
   $("plan-btn").addEventListener("click", () => runPlan());
   $("status-btn").addEventListener("click", () => checkStatus());
-  $("run-btn").addEventListener("click", () => startRun("install"));
+  $("run-btn").addEventListener("click", () => {
+    const verb = selectedVerb();
+    if (verb === "remove") {
+      runRemoveWithConfirm(Array.from(S.selection));
+      return;
+    }
+    startRun(verb);
+  });
+  $("verb").addEventListener("change", () => runPlan());
   $("remove-btn").addEventListener("click", openRemoveModal);
   $("confirm-cancel").addEventListener("click", closeModal);
   $("confirm-modal").addEventListener("click", (ev) => {

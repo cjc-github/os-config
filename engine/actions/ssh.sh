@@ -124,3 +124,15 @@ action_ssh_verify() {
   fi
   log_ok "[$id] 私钥存在且权限正确（$keyfile）"
 }
+
+# status：密钥状态（只读）
+action_ssh_status() {
+  local id="$1" type keyfile
+  type="$(_ssh_key_type)" || type=ed25519
+  keyfile="$_SSH_KEY_DIR/id_${type}"
+  if [[ -f "$keyfile" ]]; then
+    printf '    %-22s %s\n' "$id" "已生成 $keyfile"
+  else
+    printf '    %-22s %s\n' "$id" "未生成 $keyfile"
+  fi
+}

@@ -130,7 +130,10 @@ profile_resolve() {
         esac
         [[ -n "$spec" ]] || { log_error "profile [$name] 的 $token 缺少包名"; return 1; }
         id="$(printf '%s' "$spec" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_-' '-')"
-        id="${id#-}"; id="${id%-}"
+        # 去掉首尾所有 '-';规则与 ui/schema.py 的 normalize_adhoc_id 保持一致，
+        # 否则 CLI 与 Web UI 会给同一个 token 算出不同的 id。
+        while [[ "$id" == -* ]]; do id="${id:1}"; done
+        while [[ "$id" == *- ]]; do id="${id%?}"; done
         catalog_define_adhoc "$id" "$backend" "$spec" "" "profile 内联：$token" || {
           log_error "profile [$name] 无法注册内联工具：$token"; return 1
         }
