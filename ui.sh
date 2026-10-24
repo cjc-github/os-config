@@ -79,21 +79,29 @@ fi
 if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" ]]; then
   die_usage "只允许监听本机地址（127.0.0.1 或 localhost）: $HOST"
 fi
-if ! command -v python3 >/dev/null 2>&1; then
-  printf '错误: 需要 python3（>= 3.10）\n' >&2
+# 解释器探测：Windows 的 Git Bash 里常常只有 python 没有 python3，而
+# Microsoft Store 的 python3 存根一执行就退出 49——所以必须真跑一次。
+PY_BIN=""
+for _pycand in python3 python py; do
+  _pypath="$(command -v "$_pycand" || true)"
+  [[ -n "$_pypath" ]] || continue
+  if "$_pypath" -c 'import sys' >/dev/null 2>&1; then PY_BIN="$_pypath"; break; fi
+done
+if [[ -z "$PY_BIN" ]]; then
+  printf '错误: 需要 python（>= 3.10）\n' >&2
   exit 1
 fi
-# 只检查“存在”是不够的：服务端用了 3.10 才有的语法（X | Y 类型标注），
+# 只检查"存在"是不够的：服务端用了 3.10 才有的语法（X | Y 类型标注），
 # 低版本会在启动后直接抛 SyntaxError。
-py_ver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+py_ver="$("$PY_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
 if [[ ! "$py_ver" =~ ^[0-9]+\.[0-9]+$ ]]; then
-  printf '错误: 无法识别 python3 版本（当前：%s），需要 python3 >= 3.10\n' "${py_ver:-未知}" >&2
+  printf '错误: 无法识别 python 版本（当前：%s），需要 python >= 3.10\n' "${py_ver:-未知}" >&2
   exit 1
 fi
 py_major="${py_ver%%.*}"
 py_minor="${py_ver##*.}"
 if (( 10#$py_major < 3 || (10#$py_major == 3 && 10#$py_minor < 10) )); then
-  printf '错误: 需要 python3 >= 3.10（当前：%s）\n' "$py_ver" >&2
+  printf '错误: 需要 python >= 3.10（当前：%s）\n' "$py_ver" >&2
   exit 1
 fi
 
@@ -130,14 +138,14 @@ if [[ -t 0 ]] && command -v sudo >/dev/null 2>&1; then
   fi
 fi
 
-TOKEN="$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')"
+TOKEN="$("$PY_BIN" -c 'import secrets;print(secrets.token_urlsafe(32))')"
 if [[ -z "$TOKEN" ]]; then
   printf '错误: 无法生成访问 token\n' >&2
   exit 1
 fi
 
 port_ready() {
-  python3 -c 'import socket,sys
+  "$PY_BIN" -c 'import socket,sys
 s=socket.socket(); s.settimeout(0.3)
 try:
     s.connect(("127.0.0.1", int(sys.argv[1])))
@@ -155,7 +163,7 @@ if port_ready >/dev/null 2>&1; then
 fi
 
 PYTHONPATH="$ROOT" OS_CONFIG_UI_TOKEN="$TOKEN" \
-  python3 -m ui.server --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
+  "$PY_BIN" -m ui.server --host "$HOST" --port "$PORT" >>"$LOG" 2>&1 &
 SERVER_PID=$!
 
 ready=0

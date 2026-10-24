@@ -1,4 +1,4 @@
-import json, socket, tempfile, threading, time, unittest, urllib.error, urllib.request
+import json, os, socket, subprocess, sys, tempfile, threading, time, types, unittest, urllib.error, urllib.request
 from pathlib import Path
 from unittest import mock
 from ui import schema
@@ -162,6 +162,74 @@ class LogAttributionTests(unittest.TestCase):
 
     def test_no_context(self):
         self.assertIsNone(server_mod._log_item_id("=== install ===", None))
+
+class EngineSelectionTests(unittest.TestCase):
+    """UI 必须按平台选引擎：Windows 跑 setup.ps1，其余跑 setup.sh。"""
+
+    def test_posix_uses_bash(self):
+        project = Path("/opt/os-config")
+        cmd = server_mod.default_engine_command(project, platform="posix")
+        # 用 Path 拼期望值：在 Windows 上跑时分隔符会变成反斜杠
+        self.assertEqual(cmd, ["bash", str(project / "setup.sh")])
+
+    def test_windows_uses_powershell(self):
+        cmd = server_mod.default_engine_command(Path(r"C:\os-config"),
+                                                platform="nt")
+        self.assertEqual(cmd[0], "powershell")
+        for flag in ("-NoProfile", "-ExecutionPolicy", "Bypass", "-File"):
+            self.assertIn(flag, cmd)
+        self.assertTrue(cmd[-1].endswith("setup.ps1"), cmd)
+
+    def test_appconfig_default_follows_platform(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AppConfig(project_dir=d, static_dir=d, state_dir=d)
+            self.assertEqual(cfg.setup_cmd,
+                             server_mod.default_engine_command(Path(d)))
+
+    def test_appconfig_explicit_cmd_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AppConfig(project_dir=d, static_dir=d, state_dir=d,
+                            setup_cmd=["bash", "/bin/true"])
+            self.assertEqual(cfg.setup_cmd, ["bash", "/bin/true"])
+
+
+class ProcessTeardownTests(unittest.TestCase):
+    """超时终止与残留锁清理必须跨平台工作（Windows 上没有 killpg/SIGKILL）。"""
+
+    def test_terminate_process_tree_kills_child(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self.assertIsNone(proc.poll())
+            server_mod._terminate_process_tree(proc)
+            proc.wait(timeout=20)
+            self.assertIsNotNone(proc.poll())
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    def test_stale_lock_with_dead_pid_is_cleared(self):
+        # 死 pid 的判定跨平台不同：POSIX 抛 ProcessLookupError，Windows 抛
+        # WinError 87。两者都必须判为“进程已死”并清锁，否则一次异常退出就能
+        # 把 UI 永久堵死（这是 Windows 上真实存在过的行为）。
+        dead_pid = (1 << 22) + 12345
+        try:
+            os.kill(dead_pid, 0)
+            self.skipTest("找不到可用的死 pid")
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            if not (os.name == "nt" and getattr(exc, "winerror", None) == 87):
+                self.skipTest("找不到可用的死 pid")
+        with tempfile.TemporaryDirectory() as d:
+            lock = Path(d) / "run.lock"
+            lock.write_text(str(dead_pid), encoding="utf-8")
+            job = types.SimpleNamespace(
+                server=types.SimpleNamespace(lock_path=lock))
+            self.assertTrue(server_mod.RunJob._clear_stale_lock(job))
+            self.assertFalse(lock.exists())
+
 
 class ServerFixture(unittest.TestCase):
     @classmethod

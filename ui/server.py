@@ -51,9 +51,31 @@ class AppConfig:
         self.static_dir = Path(self.static_dir)
         self.state_dir = Path(self.state_dir)
         if self.setup_cmd is None:
-            self.setup_cmd = ["bash", str(self.project_dir / "setup.sh")]
+            self.setup_cmd = default_engine_command(self.project_dir)
         else:
             self.setup_cmd = list(self.setup_cmd)
+
+
+def default_engine_command(project_dir: Path,
+                           platform: str | None = None) -> list[str]:
+    """按平台选择引擎入口。
+
+    Windows 上用 PowerShell 跑 ``setup.ps1``，其余平台用 bash 跑
+    ``setup.sh``。两个引擎的动词、选择参数、``--list --json`` 输出与
+    JSONL 事件流完全一致，因此上层（catalog 加载、计划预览、任务执行）
+    不需要知道当前跑的是哪一个；测试可显式传 ``setup_cmd`` 覆盖。
+
+    ``platform`` 仅供测试注入（``"nt"`` / ``"posix"``），默认取 ``os.name``。
+    """
+    if platform is None:
+        platform = os.name
+    project_dir = Path(project_dir)
+    if platform == "nt":
+        return [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(project_dir / "setup.ps1"),
+        ]
+    return ["bash", str(project_dir / "setup.sh")]
 
 
 class EventBus:
@@ -118,6 +140,34 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _RUN_VERBS = ("install", "update", "remove", "verify", "status")
 # 只读动词用 --dry-run 预览时不会短路（引擎只对写动词短路），
 # 因此预览一律用写动词生成，避免真的去跑 curl 校验之类的副作用。
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    """超时后终止子进程。
+
+    Windows 上没有 ``os.killpg`` 与 ``signal.SIGKILL``（直接 AttributeError），
+    用 ``taskkill /T`` 杀整棵进程树——否则 powershell 起的原生子进程会继续
+    持有 stdout 管道，让随后的 ``communicate()`` 永远等不到 EOF。
+    POSIX 上沿用原来的进程组 SIGKILL。两条路都失败时退回 ``proc.kill()``。
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, timeout=15, check=False)
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
 _PLAN_VERBS = ("install", "update", "remove")
 _HISTORY_LOG_LIMIT = 1024 * 1024
 
@@ -332,6 +382,10 @@ class Handler(BaseHTTPRequestHandler):
                 cwd=str(self.server.config.project_dir),
                 capture_output=True,
                 text=True,
+                # 两个引擎都把 stdout 按 UTF-8 写（setup.ps1 显式设置了
+                # [Console]::OutputEncoding）；不指定编码时 Python 用区域编码
+                # （中文 Windows 上是 GBK），中文目录/描述会全变乱码。
+                encoding="utf-8",
                 timeout=15,
                 check=False,
             )
@@ -414,6 +468,10 @@ class Handler(BaseHTTPRequestHandler):
         return merged
 
     def _sudo_available(self) -> bool:
+        # Windows 上没有 sudo 语义（Win11 的 sudo.exe 与这里的用法不兼容），
+        # 直接判不可用；UI 会把需要提权的项交给引擎自行处理。
+        if os.name == "nt":
+            return False
         if shutil.which("sudo") is None:
             return False
         try:
@@ -548,9 +606,12 @@ class Handler(BaseHTTPRequestHandler):
                 stderr=subprocess.STDOUT,
                 bufsize=1,
                 text=True,
+                encoding="utf-8",
                 env=env,
-                # 独立会话：超时时按进程组终止，避免 shell 的子进程
+                # 独立会话：POSIX 上超时时按进程组终止，避免 shell 的子进程
                 # 继续持有 stdout 管道导致 communicate() 永远等不到 EOF。
+                # Windows 上没有 setsid 语义（该参数被忽略），超时改走
+                # _terminate_process_tree 的 taskkill /T。
                 start_new_session=True,
             )
             timed_out = False
@@ -558,10 +619,7 @@ class Handler(BaseHTTPRequestHandler):
                 out, _ = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    proc.kill()
+                _terminate_process_tree(proc)
                 out, _ = proc.communicate()
             logs = [_redact(_ANSI_RE.sub("", line))
                     for line in (out or "").splitlines()]
@@ -1021,7 +1079,7 @@ class RunJob:
             cmd = list(self.config.setup_cmd or []) + ["--list", "--json"]
             proc = subprocess.run(
                 cmd, cwd=str(self.config.project_dir), capture_output=True,
-                text=True, timeout=15, check=False)
+                text=True, encoding="utf-8", timeout=15, check=False)
             if proc.returncode != 0:
                 raise RuntimeError(
                     f"catalog command exited {proc.returncode}")
@@ -1072,8 +1130,14 @@ class RunJob:
                 pass
             except PermissionError:
                 return False
-            except OSError:
-                return False
+            except OSError as exc:
+                # Windows 上探测不存在的 pid 抛的是 WinError 87（参数错误），
+                # 不是 ProcessLookupError；不认它的话残留锁在 Windows 上永远
+                # 清不掉，一次异常退出就能把 UI 永久堵死。
+                if os.name == "nt" and getattr(exc, "winerror", None) == 87:
+                    pass
+                else:
+                    return False
             else:
                 return False
         try:
@@ -1229,6 +1293,7 @@ class RunJob:
             stderr=subprocess.STDOUT,
             bufsize=1,
             text=True,
+            encoding="utf-8",
             env=env,
         )
         stop = threading.Event()
