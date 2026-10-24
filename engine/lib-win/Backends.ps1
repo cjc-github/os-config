@@ -36,42 +36,69 @@ function Update-WingetIndex {
   <#
     一次 bulk 调用建立 id -> 版本列表。
     一个 id 可能对应多行（实测 Thunder.Xmp 出现两次），因此值是数组。
-    解析规则见文件头：定位等于 id 的字段，取其下一个字段为版本。
+
+    解析规则：**按表头定位 Id 列的字符偏移**，再逐行在该偏移处取材。
+    不能按"最后一个 id 形状的 token"找——版本号（23.01）与可用版本
+    （26.05）同样符合 Publisher.Product 形态，末位匹配往往落在"可用版本"
+    上，紧接着的版本读取越界，整行被跳过（实测全量 112 行解析出 0 条）。
+    表头是本地化的，但 "ID" 是唯一不变的 ASCII 列名，按它定位即可。
   #>
   $idx = @{}
   $out = & winget.exe list --source winget --disable-interactivity --accept-source-agreements 2>&1
+  $idCol = -1
+  $rows = New-Object System.Collections.Generic.List[string]
   foreach ($raw in $out) {
     if ($null -eq $raw) { continue }
-    $line = $raw.ToString().Trim()
-    if ($line -eq '') { continue }
-    # 跳过分隔线（全是 - 或 =）
-    if ($line -match '^[-=\s]+$') { continue }
-    $tokens = @($line -split '\s+' | Where-Object { $_ -ne '' })
-    if ($tokens.Count -lt 2) { continue }
-
-    # 找最后一个等于已知 id 形态的字段：winget 包 id 形如 Publisher.Product
-    $idIdx = -1
-    for ($i = 0; $i -lt $tokens.Count; $i++) {
-      if ($tokens[$i] -match '^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9._-]+$') { $idIdx = $i }
+    $line = $raw.ToString()
+    if ($idCol -lt 0) {
+      # 大小写不敏感：英文区域的表头写作 "Id"，中文区域写作 "ID"
+      $m = [regex]::Match($line, '\bID\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+      if ($m.Success) { $idCol = $m.Index }
     }
-    if ($idIdx -lt 0 -or $idIdx + 1 -ge $tokens.Count) { continue }
-    $id = $tokens[$idIdx].ToLowerInvariant()
+    $rows.Add($line)
+  }
+  foreach ($line in $rows) {
+    if ($line.Trim() -eq '') { continue }
+    # 跳过分隔线（全是 - 或 =）与表头自身
+    if ($line.Trim() -match '^[-=\s]+$') { continue }
+    if ($idCol -lt 0 -or $line.Length -le $idCol) { continue }
+    # 从 Id 列起点取材：第一个 token 是包 id，第二个是已装版本
+    $parts = @($line.Substring($idCol) -split '\s+' | Where-Object { $_ -ne '' })
+    if ($parts.Count -lt 2) { continue }
+    $id = $parts[0].ToLowerInvariant()
     if ($id -eq 'id') { continue }
-    $ver = $tokens[$idIdx + 1]
+    $ver = $parts[1]
+    if (-not ($ver -match '^\d')) { continue }
     if (-not (Test-DictHasKey -Dictionary $idx -Key $id)) { $idx[$id] = New-Object System.Collections.ArrayList }
     $null = $idx[$id].Add($ver)
   }
   $script:WingetIndex = $idx
 }
 
+function Get-WingetIndexVersion {
+  <# 只查内存索引；没有索引或查不到返回 $null。供 Get-WingetVersion 走捷径。 #>
+  param([Parameter(Mandatory=$true)][string]$PackageId)
+  if ($null -eq $script:WingetIndex) { return $null }
+  $id = $PackageId.ToLowerInvariant()
+  if (-not (Test-DictHasKey -Dictionary $script:WingetIndex -Key $id)) { return $null }
+  $vers = @($script:WingetIndex[$id] | Where-Object { $_ -match '^\d' })
+  if ($vers.Count -eq 0) { return $null }
+  # 多版本时取最大者（与单包查询的语义一致）
+  return ($vers | Sort-Object -Descending | Select-Object -First 1)
+}
+
 function Get-WingetVersion {
   <#
     取已安装版本（多版本时取最大者）。未安装返回 $null。
-    精确版本场景（track=pin）走单包查询，避免批量索引的解析误差。
+    先查 Update-WingetIndex 建好的内存索引（全量只跑一次），
+    未建索引或查不到再走单包查询——后者对每个包都要一次数秒级调用。
   #>
   param([Parameter(Mandatory=$true)][string]$PackageId)
-  $id = $PackageId.ToLowerInvariant()
 
+  $cached = Get-WingetIndexVersion -PackageId $PackageId
+  if ($null -ne $cached) { return $cached }
+
+  $id = $PackageId.ToLowerInvariant()
   $out = & winget.exe list --id $PackageId --exact --source winget --disable-interactivity --accept-source-agreements 2>&1
   $rc = $LASTEXITCODE
   if ($rc -ne 0) { return $null }
@@ -465,9 +492,19 @@ function Install-NpmGlobalFixed {
     return 1
   }
   $spec = if ($Version -eq 'latest' -or [string]::IsNullOrEmpty($Version)) { $Package } else { ($Package + '@' + $Version) }
+  # 参数与 Bash 版 npm_install_global_fixed 逐项对齐：--foreground-scripts 让
+  # 原生模块的安装脚本输出可见（否则 postinstall 失败只剩一句空错误），
+  # --prefer-offline/超时项对付慢网络，--no-audit/--no-fund 少打两屏噪音。
   $cmd = New-Object System.Collections.Generic.List[string]
   $cmd.Add('install')
   $cmd.Add('-g')
+  $cmd.Add('--loglevel=info')
+  $cmd.Add('--foreground-scripts')
+  $cmd.Add('--no-audit')
+  $cmd.Add('--no-fund')
+  $cmd.Add('--prefer-offline')
+  $cmd.Add('--fetch-timeout=120000')
+  $cmd.Add('--fetch-retry-maxtimeout=120000')
   if (-not [string]::IsNullOrEmpty($Registry)) { $cmd.Add('--registry'); $cmd.Add($Registry) }
   $cmd.Add($spec)
 

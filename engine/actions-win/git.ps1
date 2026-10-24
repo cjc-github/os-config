@@ -18,11 +18,16 @@ Set-StrictMode -Version 2.0
 
 function Get-GitGlobalConfigPath {
   <# _git_global_config_path 的移植 #>
-  $home = $script:HomeDir
-  $primary = Join-Path $home '.gitconfig'
+  # 变量名不能叫 $home：那是 PowerShell 的只读自动变量（用户主目录）。
+  # Set-StrictMode 2.0 下赋值直接抛 SessionStateUnauthorizedAccessException，
+  # 函数随后用自动变量的值继续跑——生产环境里两者恰好相同所以看不出来，
+  # 但每次调用都报一次错，且测试把 HomeDir 改到沙箱时回滚备份会指到真实
+  # ~/.gitconfig（曾把真实配置备份走）。
+  $homeDir = $script:HomeDir
+  $primary = Join-Path $homeDir '.gitconfig'
   if (-not (Test-Path -LiteralPath $primary)) {
     $xdg = [Environment]::GetEnvironmentVariable('XDG_CONFIG_HOME')
-    if ([string]::IsNullOrEmpty($xdg)) { $xdg = Join-Path $home '.config' }
+    if ([string]::IsNullOrEmpty($xdg)) { $xdg = Join-Path $homeDir '.config' }
     $alt = Join-Path $xdg 'git\config'
     if (Test-Path -LiteralPath $alt) { return $alt }
   }
