@@ -204,6 +204,7 @@ engine/
 state/                   运行时状态（manifest + 每动作持久备份 + .lock）
 tests/run.sh             不依赖 Bats 的回归测试（含 Windows 引擎用例，有 PowerShell 才跑）
 docs/DESIGN.md           详细设计
+docs/FEATURES.md         功能清单（当前已支持的能力，按平台标注）
 logs/                    运行时日志（.gitignore 忽略）
 ```
 
