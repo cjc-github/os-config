@@ -26,8 +26,24 @@ for _pycand in python3 python py; do
 done
 PASS=0
 FAIL=0
+SKIP=0
 FILTER="${1:-}"
 MATCHED=0
+
+# ---------------------------------------------------------------------------
+# 平台跳过：下列用例整体依赖 Windows 上不可用的能力，在 MSYS/CYGWIN 下记 skip
+# 并单独计数，不让全套在 Windows 上无故染红：
+#   * 符号链接——NTFS 上创建需要管理员/开发者模式；
+#   * 原生 python3/node 环境——Python 在这里 spawn 不到 bash，UI 套件跑不起来。
+# 只断言权限位（600/700）的用例不在此列：它们在用例内部按 _IS_MSYS 守门，
+# 其余断言照常在 Windows 上执行。Linux/macOS 上全部照常全量跑。
+# -------------------------------------------------------------------------
+_IS_MSYS=0
+case "$(uname -s 2>/dev/null || true)" in
+  MSYS_*|MINGW*|CYGWIN*) _IS_MSYS=1 ;;
+esac
+
+_POSIX_ONLY_TESTS=" test_action_syslog_remove_own_link_only test_action_syslog_verify_checks_bat_link test_ui_launcher test_ui_python_suite test_ui_node_suite "
 
 # profiles/exported.conf 是 export 动词的默认产物（已 gitignore），不属于仓库
 # 自带的 profile 集合。断言集合/数量的用例会被它干扰，整轮运行前临时挪开。
@@ -91,6 +107,12 @@ run_test() {
   local name="$1" fn="$2"
   if ! _test_filter_match "$name" "$fn"; then return 0; fi
   MATCHED=$((MATCHED + 1))
+
+  if [[ "$_IS_MSYS" == 1 && "$_POSIX_ONLY_TESTS" == *" $fn "* ]]; then
+    printf 'skip %s（MSYS 环境限制：依赖符号链接或原生 python3/node）\n' "$name"
+    SKIP=$((SKIP + 1))
+    return 0
+  fi
 
   local TMPROOT
   TMPROOT="$(mktemp -d)"
@@ -629,7 +651,10 @@ test_graph() {
 test_state() {
   state_init
   assert_file_exists "$STATE_FILE" "state 清单创建"
-  assert_eq 600 "$(stat -c '%a' "$STATE_FILE")" "清单权限 600"
+  # 权限位断言只对 POSIX 文件系统有意义：NTFS 没有模式位，stat 恒返回 644/755
+  if [[ "$_IS_MSYS" != 1 ]]; then
+    assert_eq 600 "$(stat -c '%a' "$STATE_FILE")" "清单权限 600"
+  fi
 
   state_record foo action1 a b
   assert_eq "a
@@ -644,7 +669,9 @@ b" "$(state_artifacts foo)" "artifacts 记录"
   assert_false "forget 后无记录" state_has foo
 
   local d; d="$(state_action_dir ssh)"
-  assert_eq 700 "$(stat -c '%a' "$d")" "动作私有目录权限"
+  if [[ "$_IS_MSYS" != 1 ]]; then
+    assert_eq 700 "$(stat -c '%a' "$d")" "动作私有目录权限"
+  fi
 }
 
 test_state_action_dir_mkdir_failure() {
@@ -904,7 +931,10 @@ test_log_redact() {
   assert_not_contains "$log" 'ghp_ABCDEFGHIJKLMNOP0123456789' "原始 ghp_ 令牌不落盘"
   assert_not_contains "$log" 'xyz' "原始 token 不落盘"
   assert_not_contains "$log" 'u:p' "原始凭据不落盘"
-  assert_eq 600 "$(stat -c '%a' "$LOG_FILE")" "日志权限 600"
+  # 权限位只对 POSIX 文件系统有意义（NTFS 上 stat 恒返回 644）
+  if [[ "$_IS_MSYS" != 1 ]]; then
+    assert_eq 600 "$(stat -c '%a' "$LOG_FILE")" "日志权限 600"
+  fi
 }
 
 # 日志目录不可写时应降级为仅终端输出，而不是让每次日志都向 stderr 抛重定向错误。
@@ -1417,9 +1447,20 @@ test_action_ssh() {
   action_ssh_apply ssh >/dev/null 2>&1; rc=$?
   assert_rc_eq 0 "$rc" "ssh apply"
   assert_file_exists "$HOME/.ssh/id_ed25519" "私钥生成"
-  assert_eq 600 "$(stat -c '%a' "$HOME/.ssh/id_ed25519")" "私钥权限"
-  action_ssh_verify ssh >/dev/null 2>&1; rc=$?
-  assert_rc_eq 0 "$rc" "ssh verify"
+  # 权限位只对 POSIX 文件系统有意义（NTFS 无模式位；Windows 侧的 ACL 校验
+  # 由 engine/actions-win/ssh.ps1 与 test_win_ssh_keygen_empty_passphrase 覆盖）
+  if [[ "$_IS_MSYS" != 1 ]]; then
+    assert_eq 600 "$(stat -c '%a' "$HOME/.ssh/id_ed25519")" "私钥权限"
+  fi
+  if [[ "$_IS_MSYS" == 1 ]]; then
+    # NTFS 上 stat 恒返回 644，Bash 版 verify 的 600 检查必然不过——这是环境
+    # 限制而非缺陷，这里把该行为钉住：MSYS 下 verify 必须因权限不过而失败
+    action_ssh_verify ssh >/dev/null 2>&1; rc=$?
+    assert_rc_eq 1 "$rc" "MSYS 下 verify 因权限位不支持而失败"
+  else
+    action_ssh_verify ssh >/dev/null 2>&1; rc=$?
+    assert_rc_eq 0 "$rc" "ssh verify"
+  fi
   action_ssh_remove ssh >/dev/null 2>&1; rc=$?
   assert_rc_eq 0 "$rc" "ssh remove"
   assert_file_missing "$HOME/.ssh/id_ed25519" "remove 删除自建密钥"
@@ -3190,6 +3231,368 @@ PS
   install_calls="${install_calls:-0}"
   # 第一次 ENOTEMPTY + 修复重试 = 2 次；第二次 install 应命中幂等跳过
   assert_eq "2" "$install_calls" "ENOTEMPTY 后重试一次，且重复 install 被幂等跳过"
+  # 安装参数与 Bash 版 npm_install_global_fixed 逐项对齐（曾经 PowerShell 侧
+  # 只传 install -g spec，丢了 foreground-scripts/超时/离线优先等 flag）
+  local first_install
+  first_install="$(grep -m1 'args=\[install ' "$TESTDIR/npm.log" 2>/dev/null || true)"
+  for flag in --loglevel=info --foreground-scripts --no-audit --no-fund \
+              --prefer-offline --fetch-timeout=120000 --fetch-retry-maxtimeout=120000; do
+    assert_contains "$first_install" "$flag" "npm install 带 $flag"
+  done
+  assert_contains "$first_install" "fake-pkg]" "install 带包规格"
+}
+
+# 回归：Windows proxy 动作全生命周期（apply/verify/remove + 禁用语义 + 幂等）。
+# 探针在沙箱 HOME 里跑，Test-Connection 与 curl.exe 用函数遮蔽（ PowerShell 函数
+# 优先于 PATH 可执行文件），不碰真实 profile 与网络。
+test_win_proxy_action_lifecycle() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows proxy 动作用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-proxy.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+foreach ($m in @('Log','Util','Events','Catalog','Profile','Graph','State','Rollback','Backends','Engine','Doctor','Export','ListJson')) {
+  . (Join-Path $script:ProjectDir ("engine\lib-win\{0}.ps1" -f $m))
+}
+$actionFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:ProjectDir 'engine\actions-win') -Filter '*.ps1' -File | Sort-Object -Property Name)
+foreach ($af in $actionFiles) { . $af.FullName }
+$null = Import-Catalog
+$null = Import-Profile
+$script:EventsFile = ''
+$null = Initialize-StatePaths -Dir (Join-Path $env:OSC_TEST_DIR 'state')
+$script:HomeDir = $env:OSC_TEST_DIR
+
+function global:Test-Connection { param([Parameter(ValueFromRemainingArguments)]$a) return $true }
+function global:curl.exe { param([Parameter(ValueFromRemainingArguments)]$a) $global:LASTEXITCODE = 0; return }
+$env:PROXY_ENABLED = 'true'
+$env:PROXY_HOST = '10.0.0.1'
+$env:PROXY_PORT = '7890'
+
+$profile = Get-PowerShellProfilePath
+$rc1 = & action_proxy_apply -Id 'proxy'
+$rc2 = & action_proxy_verify -Id 'proxy'
+$block = Get-ManagedBlock -Path $profile -Begin $script:PROXY_BEGIN -End $script:PROXY_END
+$hasUrl = ($block -match 'HTTPS_PROXY = ''http://10\.0\.0\.1:7890''')
+$rc3 = & action_proxy_remove -Id 'proxy'
+$afterRemove = Get-ManagedBlock -Path $profile -Begin $script:PROXY_BEGIN -End $script:PROXY_END
+$rc4 = & action_proxy_apply -Id 'proxy'
+$rc5 = & action_proxy_verify -Id 'proxy'
+Write-Host ("a={0} v={1} url={2} r={3} gone={4} again={5}/{6}" -f $rc1, $rc2, $hasUrl, $rc3, [string]::IsNullOrEmpty($afterRemove), $rc4, $rc5)
+
+$env:PROXY_ENABLED = 'false'
+$rc6 = & action_proxy_verify -Id 'proxy'
+$rc7 = & action_proxy_remove -Id 'proxy'
+$rc8 = & action_proxy_verify -Id 'proxy'
+Write-Host ("disabled_with_block={0} after_remove={1}" -f $rc6, $rc8)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "a=0 v=0 url=True r=0 gone=True again=0/0" "proxy apply/verify/remove/幂等 全绿"
+  assert_contains "$out" "disabled_with_block=1 after_remove=0" "禁用时要求无残留块"
+}
+
+# 回归：Windows git 动作全生命周期。身份写入、代理键写入与 .orig 备份、
+# remove 只还原代理键不碰身份——与 Bash 版语义一致。
+test_win_git_action_lifecycle() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows git 动作用例" true
+    return 0
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    assert_true "无 git，跳过 Windows git 动作用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-git.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+foreach ($m in @('Log','Util','Events','Catalog','Profile','Graph','State','Rollback','Backends','Engine','Doctor','Export','ListJson')) {
+  . (Join-Path $script:ProjectDir ("engine\lib-win\{0}.ps1" -f $m))
+}
+$actionFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:ProjectDir 'engine\actions-win') -Filter '*.ps1' -File | Sort-Object -Property Name)
+foreach ($af in $actionFiles) { . $af.FullName }
+$null = Import-Catalog
+$null = Import-Profile
+$script:EventsFile = ''
+$null = Initialize-StatePaths -Dir (Join-Path $env:OSC_TEST_DIR 'state')
+$script:HomeDir = $env:OSC_TEST_DIR
+$env:HOME = $env:OSC_TEST_DIR
+$env:USERPROFILE = $env:OSC_TEST_DIR
+function global:Test-Connection { param([Parameter(ValueFromRemainingArguments)]$a) return $true }
+
+$env:PROXY_ENABLED = 'false'
+$env:GIT_USER_NAME = 'UI Test'
+$env:GIT_USER_EMAIL = 'ui-test@example.invalid'
+$rc1 = & action_git_apply -Id 'git'
+$rc2 = & action_git_verify -Id 'git'
+$name = Get-GitConfigValue -Key 'user.name'
+$email = Get-GitConfigValue -Key 'user.email'
+
+$env:PROXY_ENABLED = 'true'
+$env:PROXY_HOST = '10.0.0.1'
+$env:PROXY_PORT = '7890'
+$rc3 = & action_git_apply -Id 'git'
+$rc4 = & action_git_verify -Id 'git'
+$hp = Get-GitConfigValue -Key 'http.proxy'
+$orig = Join-Path (Get-StateActionDir -Name 'git') 'http.proxy.orig'
+# Evaluate now: remove deletes the whole state action dir, checking later would always be False
+$origExists = (Test-Path -LiteralPath $orig)
+
+$rc5 = & action_git_remove -Id 'git'
+$hpAfter = Get-GitConfigValue -Key 'http.proxy'
+$nameAfter = Get-GitConfigValue -Key 'user.name'
+$cfgPath = Get-GitGlobalConfigPath
+# NOTE: keep probe files pure ASCII - bash heredoc writes LF without BOM and
+# PowerShell 5.1 reads that as ANSI, so Chinese comments corrupt the tokenizer.
+$normCfg = $cfgPath.Replace('\', '/')
+$normDir = $env:OSC_TEST_DIR.Replace('\', '/')
+$inSandbox = $normCfg.StartsWith($normDir, [System.StringComparison]::OrdinalIgnoreCase)
+Write-Host ("id={0}/{1} name=[{2}] email=[{3}]" -f $rc1, $rc2, $name, $email)
+Write-Host ("proxy={0}/{1} key=[{2}] orig={3}" -f $rc3, $rc4, $hp, $origExists)
+Write-Host ("remove={0} key_after=[{1}] name_after=[{2}] cfg_in_sandbox={3}" -f $rc5, $hpAfter, $nameAfter, $inSandbox)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "id=0/0 name=[UI Test] email=[ui-test@example.invalid]" "git 身份写入并校验通过"
+  assert_contains "$out" "proxy=0/0 key=[http://10.0.0.1:7890] orig=True" "代理键写入且留下原值备份"
+  assert_contains "$out" "remove=0 key_after=[] name_after=[UI Test]" "remove 还原代理键、保留身份"
+  assert_contains "$out" "cfg_in_sandbox=True" "gitconfig 路径解析在沙箱内（home 只读变量回归）"
+}
+
+# 回归：Windows nodejs 动作（fnm 路径）全生命周期。fnm 必须是真的可执行文件
+# （Test-CommandExists 只认 Application/ExternalScript，函数与别名不算已装），
+# 因此在候选目录里放假 fnm.cmd；winget 用函数遮蔽。
+test_win_nodejs_action_lifecycle() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows nodejs 动作用例" true
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    assert_true "无 node/npm，跳过 Windows nodejs 动作用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-nodejs.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+foreach ($m in @('Log','Util','Events','Catalog','Profile','Graph','State','Rollback','Backends','Engine','Doctor','Export','ListJson')) {
+  . (Join-Path $script:ProjectDir ("engine\lib-win\{0}.ps1" -f $m))
+}
+$actionFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:ProjectDir 'engine\actions-win') -Filter '*.ps1' -File | Sort-Object -Property Name)
+foreach ($af in $actionFiles) { . $af.FullName }
+$null = Import-Catalog
+$null = Import-Profile
+$script:EventsFile = ''
+$null = Initialize-StatePaths -Dir (Join-Path $env:OSC_TEST_DIR 'state')
+$script:HomeDir = $env:OSC_TEST_DIR
+$env:HOME = $env:OSC_TEST_DIR
+$env:USERPROFILE = $env:OSC_TEST_DIR
+
+function global:winget.exe { param([Parameter(ValueFromRemainingArguments)]$a) $global:LASTEXITCODE = 0 }
+$fnmDir = Join-Path $env:OSC_TEST_DIR 'AppData\Roaming\npm'
+$null = New-Item -ItemType Directory -Path $fnmDir -Force
+[System.IO.File]::WriteAllText((Join-Path $fnmDir 'fnm.cmd'), "@echo off`r`nsetlocal`r`nset FNMLOG=%OSC_TEST_DIR%\fnm.log`r`necho %*>>%FNMLOG%`r`nif `"%1`"==`"install`" mkdir `"%USERPROFILE%\AppData\Roaming\fnm\node-versions\v%2.0.0\installation`"`r`nexit /b 0`r`n", (New-Object System.Text.UTF8Encoding $false))
+$global:FnmLog = Join-Path $env:OSC_TEST_DIR 'fnm.log'
+
+# node/npm must also be directly callable by PowerShell: the harness fakes are
+# extension-less bash scripts that the call operator cannot run ("Cannot run a
+# document in the middle of a pipeline") and Test-CommandExists cannot find.
+# Put .cmd fakes here and prepend to PATH so both paths work; the npmrc lives
+# in the sandbox and never touches the real config.
+$fakeBin = Join-Path $env:OSC_TEST_DIR 'fakebin'
+$null = New-Item -ItemType Directory -Path $fakeBin -Force
+[System.IO.File]::WriteAllText((Join-Path $fakeBin 'node.cmd'), "@echo off`r`nif `"%1`"==`"--version`" echo v22.0.0`r`nexit /b 0`r`n", (New-Object System.Text.UTF8Encoding $false))
+$npmCmd = @'
+@echo off
+setlocal
+set RC=%OSC_TEST_DIR%\npmrc
+if "%1"=="config" goto cfg
+if "%1"=="--version" (echo 11.0.0&exit /b 0)
+exit /b 0
+:cfg
+if "%2"=="get" (
+  if "%3"=="userconfig" (echo %RC%&exit /b 0)
+  if "%3"=="prefix" (echo %OSC_TEST_DIR%\npm-prefix&exit /b 0)
+  for /f "usebackq tokens=1,* delims==" %%A in ("%RC%") do if "%%A"=="%3" (echo %%B&exit /b 0)
+  exit /b 0
+)
+if "%2"=="set" (
+  if exist "%RC%" findstr /v /b /c:"%3=" "%RC%">"%RC%.t" 2>nul
+  if exist "%RC%.t" (move /y "%RC%.t" "%RC%">nul) else (type nul>"%RC%")
+  echo %3=%4>>"%RC%"
+  exit /b 0
+)
+if "%2"=="delete" (
+  if exist "%RC%" findstr /v /b /c:"%3=" "%RC%">"%RC%.t" 2>nul
+  if exist "%RC%.t" move /y "%RC%.t" "%RC%">nul
+  exit /b 0
+)
+exit /b 0
+'@
+[System.IO.File]::WriteAllText((Join-Path $fakeBin 'npm.cmd'), ($npmCmd -replace "`n", "`r`n"), (New-Object System.Text.UTF8Encoding $false))
+$env:PATH = $fakeBin + ';' + $env:PATH
+
+$nodeMajor = ((& node --version 2>$null | Out-String).Trim()).TrimStart('v').Split('.')[0]
+$env:NODE_LTS_MAJOR = $nodeMajor
+$env:NPM_REGISTRY = 'https://registry.npmmirror.com'
+
+$rc1 = & action_nodejs_apply -Id 'nodejs'
+$rc2 = & action_nodejs_verify -Id 'nodejs'
+$profile = Get-PowerShellProfilePath
+$block = Get-ManagedBlock -Path $profile -Begin $script:NODEJS_ENV_BEGIN -End $script:NODEJS_ENV_END
+# Effective value comes from npm config get (verify judges the same way): the
+# fake npm answers config get registry from the env var, so the engine skips the
+# write; audit has no env shortcut and does land in the npmrc file.
+$regEffective = (& npm config get registry 2>$null | Out-String).Trim()
+$npmrcAudit = Get-NpmrcValue -Path (Get-NpmrcPath) -Key 'audit'
+
+$script:ASSUME_YES = 1
+$rc3 = & action_nodejs_remove -Id 'nodejs'
+$blockAfter = Get-ManagedBlock -Path $profile -Begin $script:NODEJS_ENV_BEGIN -End $script:NODEJS_ENV_END
+# For the restored state read the npmrc file: the fake npm always answers
+# config get registry from the env var, only the file shows the key is gone.
+$npmrcAuditAfter = Get-NpmrcValue -Path (Get-NpmrcPath) -Key 'audit'
+$versionsGone = -not (Test-Path -LiteralPath (Get-FnmRoot))
+Write-Host ("apply={0} verify={1} block={2} registry=[{3}] audit=[{4}]" -f $rc1, $rc2, (-not [string]::IsNullOrEmpty($block)), $regEffective, $npmrcAudit)
+Write-Host ("fnm=[{0}]" -f ((Get-Content $global:FnmLog -ErrorAction SilentlyContinue) -join ' | '))
+Write-Host ("remove={0} block_gone={1} versions_gone={2} audit_after=[{3}]" -f $rc3, [string]::IsNullOrEmpty($blockAfter), $versionsGone, $npmrcAuditAfter)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "apply=0 verify=0 block=True registry=[https://registry.npmmirror.com] audit=[false]" "nodejs apply/verify 全绿且 npm 配置生效"
+  assert_contains "$out" "fnm=[install" "fnm install 被调用"
+  assert_contains "$out" "remove=0 block_gone=True versions_gone=True audit_after=[]" "remove 清理版本目录/托管块并还原 npm 配置"
+}
+
+# 回归：非管理员 + 非交互时 Request-Elevation 必须明确报错并返回 1，
+# 不能挂住等输入、也不能弹 UAC。CI 与非交互终端走的都是这条分支。
+# 探针的 stdout 被重定向 => [Console]::IsOutputRedirected 为真 => 非交互。
+test_win_elevation_noninteractive_errors() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows 提权用例" true
+    return 0
+  fi
+  # 已经是管理员时这条分支不适用（会直接返回 0）
+  local admin
+  admin="$("$ps" -NoProfile -Command "if ((New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { 'yes' } else { 'no' }" 2>/dev/null)"
+  if [[ "$admin" == "yes" ]]; then
+    assert_true "当前已是管理员，跳过非交互提权用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-elev.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+. (Join-Path $script:ProjectDir 'engine\lib-win\Log.ps1')
+. (Join-Path $script:ProjectDir 'engine\lib-win\Util.ps1')
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$rc = Request-Elevation
+$sw.Stop()
+Write-Host ("rc={0} elapsed_ms={1}" -f $rc, $sw.ElapsedMilliseconds)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "rc=1" "非交互且非管理员时提权返回 1"
+  # 5 秒内必须返回：挂住或弹 UAC 都会让这条断言失败
+  local ms
+  ms="$(printf '%s\n' "$out" | sed -n 's/.*elapsed_ms=\([0-9]*\).*/\1/p' | head -1)"
+  if [[ -n "$ms" && "$ms" -lt 5000 ]]; then
+    ok
+  else
+    not_ok "提权在 5 秒内返回（elapsed_ms=$ms）"
+  fi
+}
+
+# 回归：winget 全量索引必须按表头定位 Id 列，不能按"id 形状的 token"找。
+# 真实输出里版本号（23.01）和可用版本（26.05）都符合 Publisher.Product 形态，
+# 旧实现取末位匹配，版本读取越界后整行跳过——实测全量 112 行解析出 0 条，
+# 而索引建好后本就没人用，白跑一次数秒级 winget list。
+# mock 的 bulk 输出刻意仿真真实表格（表头 + 分隔线 + 尾随可用版本列）。
+test_win_winget_index_parses_real_table() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows winget 索引用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-index.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+. (Join-Path $script:ProjectDir 'engine\lib-win\Log.ps1')
+. (Join-Path $script:ProjectDir 'engine\lib-win\Util.ps1')
+. (Join-Path $script:ProjectDir 'engine\lib-win\Catalog.ps1')
+. (Join-Path $script:ProjectDir 'engine\lib-win\Backends.ps1')
+
+# Mock a realistic two-run winget table: the English header writes "Id" (the
+# case-insensitive match must still find it), and rows carry a trailing
+function global:winget.exe {
+  param([Parameter(ValueFromRemainingArguments)][string[]]$WArgs)
+  if ($WArgs[0] -eq 'list' -and $WArgs -contains '--source') {
+    Write-Output 'Name                Id            Version    Available'
+    Write-Output '----------------------------------------------------------------------'
+    Write-Output '7-Zip 23.01 (x64)   7zip.7zip     23.01      26.05'
+    Write-Output 'Git                 Git.Git        2.39.1     2.56.0.3'
+    Write-Output 'ChatGPT             OpenAI.ChatGPT 26.1021.3705.0'
+    $global:LASTEXITCODE = 0
+    return
+  }
+  if ($WArgs[0] -eq 'list') { $global:LASTEXITCODE = 20; return }
+  $global:LASTEXITCODE = 0
+}
+
+Update-WingetIndex
+$count = 0
+if ($null -ne $script:WingetIndex) { $count = $script:WingetIndex.Count }
+Write-Host ("entries={0}" -f $count)
+$git = ''
+if ($null -ne $script:WingetIndex -and $script:WingetIndex.ContainsKey('git.git')) { $git = $script:WingetIndex['git.git'] -join ',' }
+Write-Host ("git.git=[{0}]" -f $git)
+$zip = ''
+if ($null -ne $script:WingetIndex -and $script:WingetIndex.ContainsKey('7zip.7zip')) { $zip = $script:WingetIndex['7zip.7zip'] -join ',' }
+Write-Host ("7zip.7zip=[{0}]" -f $zip)
+# "Available" column - the old parser mistook it for the package id.
+$global:LASTEXITCODE = 0
+$v = Get-WingetVersion -PackageId 'Git.Git'
+Write-Host ("cached_query=[{0}]" -f $v)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "entries=3" "三行数据全部解析入库"
+  assert_contains "$out" "git.git=[2.39.1]" "Id 列定位正确（不是尾随的可用版本）"
+  assert_contains "$out" "7zip.7zip=[23.01]" "名称含空格与括号的行也解析正确"
+  assert_contains "$out" "cached_query=[2.39.1]" "建好索引后查询走内存"
 }
 
 test_doctor_runs_all_checks() {
@@ -3381,6 +3784,11 @@ run_test 'Windows 空口令下 ssh-keygen 可用'           test_win_ssh_keygen_
 run_test 'Windows 原生调用保留空参数'                 test_win_native_step_empty_argument
 run_test 'Windows winget 安装真的传参数'               test_win_winget_install_passes_arguments
 run_test 'Windows npm ENOTEMPTY 重试'                 test_win_npm_enotempty_retry
+run_test 'Windows proxy 动作全生命周期'                test_win_proxy_action_lifecycle
+run_test 'Windows git 动作全生命周期'                  test_win_git_action_lifecycle
+run_test 'Windows nodejs 动作全生命周期'               test_win_nodejs_action_lifecycle
+run_test 'Windows 非交互提权明确报错'                  test_win_elevation_noninteractive_errors
+run_test 'Windows winget 索引按表头解析'               test_win_winget_index_parses_real_table
 run_test 'doctor 跑完全部检查'                         test_doctor_runs_all_checks
 run_test 'doctor 提示清单产物缺失'                     test_doctor_manifest_missing_artifact_warns
 run_test '--fix 只能配 verify'                        test_setup_fix_requires_verify
@@ -3393,5 +3801,5 @@ if [[ -n "$FILTER" && "$MATCHED" == 0 ]]; then
   exit 1
 fi
 
-printf '\n总计：PASS=%d FAIL=%d\n' "$PASS" "$FAIL"
+printf '\n总计：PASS=%d FAIL=%d SKIP=%d\n' "$PASS" "$FAIL" "$SKIP"
 (( FAIL == 0 ))
