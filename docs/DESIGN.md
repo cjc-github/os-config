@@ -1,7 +1,9 @@
 # os-config 项目设计
 
 > 状态：v7.1（2026-10-21）。架构从“平台 + 模块三件套”重构为“声明式 catalog + 无状态引擎 + 七动词”。
-> 当前实现 Ubuntu 22.04/24.04 的 Bash 引擎；Windows PowerShell 引擎待实现。本文以仓库现有代码为准。
+> 当前实现两套引擎：Ubuntu 22.04/24.04 的 Bash 引擎（`setup.sh` + `engine/lib/`、`engine/actions/`）
+> 与 Windows 10/11 的 PowerShell 引擎（`setup.ps1` + `engine/lib-win/`、`engine/actions-win/`）。
+> 两者共用同一份 catalog 与 profile 数据，逐函数对应。本文以仓库现有代码为准。
 
 ## 一、目标和边界
 
@@ -408,3 +410,8 @@ export_run
 **加一项体检**：在 `engine/lib/doctor.sh` 里写 `_doctor_<check>` 函数（0=ok / 1=fail / 2=warn），在 `doctor_run` 里用 `_doctor_check` 登记一行。
 
 **加一个平台**：实现对应引擎（Windows 为 `setup.ps1` + `engine/lib-win/`），复用同一套 catalog 与 profile 数据；平台差异只体现在后端与动作实现中。
+
+Windows 引擎已按上述方式落地，跨平台字段约定见 `engine/lib/catalog.sh` 文件头与 `catalog/base.catalog`
+的字段说明：`platforms` 缺省 `linux`，未声明的条目在 Windows 上被平台门跳过（rc 100）。
+`win_*` 字段由 Windows 引擎读取，Bash 引擎只解析不校验——跨平台白名单（winget/builtin）
+只在 Windows 侧有意义，在 Linux 侧校验会逼迫它认识自己不实现的后端。

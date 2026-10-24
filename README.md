@@ -6,8 +6,9 @@
 选择清单  →  依赖闭包  →  install / update / remove / verify / status
 ```
 
-> 当前实现的引擎：**Ubuntu 22.04 / 24.04**（amd64 与 arm64 自动区分镜像源）。
-> Windows 的 PowerShell 引擎尚未实现，`lib-win/` 与 `setup.ps1` 仍在规划中。
+> 当前实现的引擎：**Ubuntu 22.04 / 24.04**（amd64 与 arm64 自动区分镜像源）
+> 与 **Windows 10/11**（PowerShell 5.1+，`setup.ps1`）。
+> 两个引擎共用同一份 `catalog/` 与 `profiles/` 数据，平台差异只体现在后端与动作实现里。
 
 ## 快速开始
 
@@ -198,11 +199,18 @@ engine/
   lib/log.sh             终端 + 文件日志（脱敏）
   lib/util.sh            配置加载、步骤、重试、sudo、代理、nvm
   actions/*.sh           配置动作：mirrors/proxy/git/ssh/syslog/nosuspend/nodejs
+  lib-win/*.ps1          Windows 引擎库（上面 lib/*.sh 的逐函数移植）
+  actions-win/*.ps1      Windows 配置动作：proxy/git/ssh/nodejs
 state/                   运行时状态（manifest + 每动作持久备份 + .lock）
-tests/run.sh             不依赖 Bats 的回归测试
+tests/run.sh             不依赖 Bats 的回归测试（含 Windows 引擎用例，有 PowerShell 才跑）
 docs/DESIGN.md           详细设计
 logs/                    运行时日志（.gitignore 忽略）
 ```
+
+catalog 条目用 `platforms=linux|win|linux,win` 标注适用平台，并用 `win_backend` /
+`win_packages` / `win_commands` / `win_artifacts` 描述 Windows 侧的差异
+（例如 `[dnsutils]` 在 Linux 上装 `dnsutils` 验 `dig`，在 Windows 上验 `nslookup`）。
+未声明 `platforms` 的条目只在 Linux 生效，Windows 引擎会打印"不适用于当前平台"后跳过。
 
 ## 自测
 
@@ -214,6 +222,19 @@ node --test tests/test_app_js.js                          # 前端用例
 ```
 
 过滤条件匹配不到任何用例时返回非零，不会出现“跑了 0 个用例却显示通过”。
+
+Windows 引擎同样有回归覆盖：`export 产物可被 profile 解析器读回`、
+`export 产物不破坏同目录其它 profile`、`Windows 导出的 profile 可读回`、
+`Windows 命令探测不把别名当已安装`、`Windows list --json 的 artifacts 展开`、
+`Windows rollback 事件带 restored 列表`、`Windows catalog 缺 win_backend 报错可读`、
+`Windows config 动作真的被分派`、`Windows 空口令下 ssh-keygen 可用`、
+`Windows 原生调用保留空参数`、`Windows winget 安装真的传参数`、
+`Windows npm ENOTEMPTY 重试`。后九条会在环境里找不到 `powershell`/`pwsh` 时
+自动记为跳过（仍留一条通过断言，避免零断言被误判成失败），因此在 Linux 上跑全套不会变红。
+winget / npm 两个安装后端用 `global:winget.exe` / `global:npm` 函数遮蔽外部命令
+来记录真实入参（PowerShell 函数优先于 PATH 上的可执行文件），不真的装任何软件。
+Bash 侧对应新增 `内联条目不被平台门跳过`（--pick backend:pkg 的临时条目曾被
+平台门静默跳过，两个引擎同病）。
 
 测试全部在临时目录中进行：`HOME`、`STATE_DIR`、`PATH` 都被重定向，`apt-get`/`snap`/`npm`/`sudo`/`fuser`/`ping`/`ip` 均为 fake，不会改动宿主机 `/etc`。
 
