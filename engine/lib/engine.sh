@@ -168,8 +168,33 @@ _engine_state_sync() {
 # ---------------------------------------------------------------------------
 # 单工具分派
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 平台门：条目的 platforms 不含当前平台时跳过（返回 100 = skipped）
+#
+# 为什么要这一层：catalog 是跨平台共享的数据层，同一条 [git-cli] 在 Linux 上
+# 走 apt、在 Windows 上走 winget；也有些条目（mirrors/syslog/nosuspend/
+# lrzsz/tcpdump/...）只在一端有意义。没有 platforms 字段的条目默认 linux，
+# 因此 Bash 引擎上本函数恒为真——既有条目的门控顺序与回归结果完全不变。
+#
+# 故意放在 --no-sudo 与 --dry-run 之前：Linux 专属条目在 dry-run 下应打印
+# "不适用"而不是谎报"将执行 install"。
+# ---------------------------------------------------------------------------
+_ENGINE_PLATFORM="${_ENGINE_PLATFORM:-linux}"
+
+_engine_platform_ok() {
+  local id="$1" plats
+  plats="${CAT_PLATFORMS[$id]:-linux}"
+  case " $plats " in
+    *" $_ENGINE_PLATFORM "*) return 0 ;;
+  esac
+  log_info "[$id] 不适用于当前平台（platforms=$plats），跳过"
+  return 1
+}
+
 _engine_dispatch_verb() {
   local verb="$1" id="$2"
+
+  _engine_platform_ok "$id" || return 100   # 约定：skipped
 
   if [[ "${NO_SUDO:-0}" == 1 ]] && _engine_needs_sudo "$id"; then
     log_warn "[$id] 需要提权，--no-sudo 下跳过"

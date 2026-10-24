@@ -25,9 +25,14 @@ packages=git
 commands=git
 track=latest
 deps=
+platforms=linux,win
+win_backend=winget
+win_packages=Git.Git
+win_commands=git
 desc=Git 版本控制
 group=config
 
+# Windows 10 1809+ 自带 OpenSSH 客户端（System32\OpenSSH\ssh.exe），无需安装。
 [openssh-client]
 type=package
 backend=apt
@@ -35,6 +40,9 @@ packages=openssh-client
 commands=ssh
 track=latest
 deps=
+platforms=linux,win
+win_backend=builtin
+win_commands=ssh
 desc=OpenSSH 客户端
 group=config
 
@@ -59,6 +67,8 @@ desc=日志查看与轮转工具（lnav/bat/logrotate）
 group=config
 
 # --- 配置动作 -------------------------------------------------------------
+# 平台说明：mirrors / syslog / nosuspend 仅适用于 Linux（APT 源、journald、GNOME），
+# 未声明 platforms 即默认 linux，Windows 引擎会自动跳过并给出提示。
 [mirrors]
 type=config
 action=mirrors
@@ -73,9 +83,11 @@ group=config
 type=config
 action=proxy
 artifacts=~/.bashrc
+win_artifacts=${PSPROFILE}
 sudo=0
 track=latest
 deps=
+platforms=linux,win
 desc=推导代理地址并写入 shell 代理环境变量
 group=config
 
@@ -86,6 +98,7 @@ artifacts=~/.gitconfig ~/.config/git/config
 sudo=0
 track=latest
 deps=git-cli
+platforms=linux,win
 desc=配置 git 身份与代理
 group=config
 
@@ -96,6 +109,7 @@ artifacts=~/.ssh
 sudo=0
 track=latest
 deps=openssh-client
+platforms=linux,win
 desc=生成 SSH 用户密钥
 group=config
 
@@ -119,17 +133,25 @@ deps=
 desc=关闭桌面息屏与自动锁屏
 group=config
 
+# Windows 上由 engine/actions-win/nodejs.ps1 实现：经 winget 装 fnm，
+# 用 fnm 管理 Node 版本（保留 NODE_VERSION 精确 pin 语义且免管理员）。
+# ${PSPROFILE} 由 Windows 引擎解析为 $PROFILE.CurrentUserCurrentHost，
+# 以避免 Documents 被 OneDrive 重定向时 catalog 里写死的路径对不上。
 [nodejs]
 type=config
 action=nodejs
 artifacts=~/.nvm ~/.npmrc
+win_artifacts=${HOME}\AppData\Roaming\fnm\node-versions ${HOME}\.npmrc ${PSPROFILE}
 sudo=0
 track=latest
 deps=curl
-desc=通过 nvm 安装 Node LTS 并配置 npm 镜像
+platforms=linux,win
+desc=通过版本管理器安装 Node LTS 并配置 npm 镜像
 group=runtime
 
 # --- AI 编码 CLI（npm 全局包） --------------------------------------------
+# npm 在 Windows 上原生可用，因此三条只需声明 platforms=linux,win，
+# 不需要 win_backend / win_packages。
 [claude]
 type=package
 backend=npm
@@ -138,6 +160,7 @@ version=$CLAUDE_CODE_VERSION
 commands=claude
 track=pin
 deps=nodejs
+platforms=linux,win
 desc=Claude Code CLI
 group=ai
 
@@ -149,6 +172,7 @@ version=$CODEX_VERSION
 commands=codex
 track=pin
 deps=nodejs
+platforms=linux,win
 desc=OpenAI Codex CLI
 group=ai
 
@@ -160,5 +184,6 @@ version=$OPENCODE_VERSION
 commands=opencode
 track=pin
 deps=nodejs
+platforms=linux,win
 desc=OpenCode CLI
 group=ai

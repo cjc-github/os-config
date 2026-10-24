@@ -14,11 +14,19 @@
 #   desc      = 一句话说明
 #   group     = 分组名（供 --list 归类显示）
 #
+# 平台相关字段（可选；Windows 引擎 setup.ps1 读取，Bash 引擎忽略其内容）：
+#
+#   platforms      = linux | win | linux,win   （缺省 linux）
+#   win_backend    = winget | npm              （platforms 含 win 且 backend 非 npm 时必填）
+#   win_packages   = winget 包 id（空格分隔；与 apt 包名不同，必须单独声明）
+#   win_commands   = Windows 上的验证命令（缺省回落 commands）
+#
 # 约束：工具标识只允许小写字母、数字、下划线、连字符。
 # 用户通常只需要改 profiles/*.conf 选择工具，不需要改本文件。
 # ===========================================================================
 
 # --- 核心依赖 -------------------------------------------------------------
+# Windows 上 CA 根证书由系统自带，用 win_backend=builtin 表示「无需安装」。
 [ca-certificates]
 type=package
 backend=apt
@@ -26,6 +34,8 @@ packages=ca-certificates
 commands=
 track=latest
 deps=
+platforms=linux,win
+win_backend=builtin
 desc=HTTPS CA 根证书
 group=core
 
@@ -36,6 +46,9 @@ packages=curl
 commands=curl
 track=latest
 deps=ca-certificates
+platforms=linux,win
+win_backend=builtin
+win_commands=curl
 desc=HTTP/HTTPS 命令行客户端
 group=core
 
@@ -46,6 +59,10 @@ packages=wget
 commands=wget
 track=latest
 deps=ca-certificates
+platforms=linux,win
+win_backend=winget
+win_packages=JernejSimoncic.Wget
+win_commands=wget
 desc=文件下载工具
 group=core
 
@@ -56,6 +73,10 @@ packages=gnupg
 commands=gpg
 track=latest
 deps=
+platforms=linux,win
+win_backend=winget
+win_packages=GnuPG.GnuPG
+win_commands=gpg
 desc=GPG 密钥与签名工具
 group=core
 
@@ -81,6 +102,10 @@ desc=增量文件同步
 group=transfer
 
 # --- 压缩解压 -------------------------------------------------------------
+# zip / unzip 只有 Linux 一条：Windows 不内置这两个命令（winget 里也没有提供
+# zip CLI 的干净包），曾把它们标成 platforms=linux,win + win_backend=builtin，
+# 结果是 install 谎称"系统自带，无需安装"、verify 又永远找不到命令而无法收敛。
+# Windows 上归档由 [7zip]（winget）与系统自带 tar.exe 覆盖，故此处不声明 win。
 [zip]
 type=package
 backend=apt
@@ -148,6 +173,10 @@ packages=7zip
 commands=7z
 track=latest
 deps=
+platforms=linux,win
+win_backend=winget
+win_packages=7zip.7zip
+win_commands=7z
 desc=7-Zip 压缩解压
 group=archive
 
@@ -162,6 +191,8 @@ desc=RAR 解压（自由实现）
 group=archive
 
 # --- 网络诊断 -------------------------------------------------------------
+# ping / net-tools / dnsutils / traceroute 在 Windows 上由系统命令提供，
+# 用 win_backend=builtin 表示「系统自带，无需安装」，win_commands 换成 Windows 命令名。
 [ping]
 type=package
 backend=apt
@@ -169,6 +200,9 @@ packages=iputils-ping
 commands=ping
 track=latest
 deps=
+platforms=linux,win
+win_backend=builtin
+win_commands=ping
 desc=网络连通性检查
 group=network
 
@@ -179,6 +213,9 @@ packages=dnsutils
 commands=dig
 track=latest
 deps=
+platforms=linux,win
+win_backend=builtin
+win_commands=nslookup
 desc=DNS 查询与诊断
 group=network
 
@@ -189,6 +226,9 @@ packages=net-tools
 commands=netstat
 track=latest
 deps=
+platforms=linux,win
+win_backend=builtin
+win_commands=netstat
 desc=传统网络诊断命令
 group=network
 
@@ -199,6 +239,9 @@ packages=traceroute
 commands=traceroute
 track=latest
 deps=
+platforms=linux,win
+win_backend=builtin
+win_commands=tracert
 desc=路由追踪
 group=network
 
@@ -280,6 +323,10 @@ packages=jq
 commands=jq
 track=latest
 deps=
+platforms=linux,win
+win_backend=winget
+win_packages=jqlang.jq
+win_commands=jq
 desc=JSON 命令行处理
 group=system
 
@@ -330,6 +377,10 @@ packages=ripgrep
 commands=rg
 track=latest
 deps=
+platforms=linux,win
+win_backend=winget
+win_packages=BurntSushi.ripgrep.MSVC
+win_commands=rg
 desc=高速文本搜索
 group=system
 
@@ -340,6 +391,10 @@ packages=fd-find
 commands=fdfind
 track=latest
 deps=
+platforms=linux,win
+win_backend=winget
+win_packages=sharkdp.fd
+win_commands=fd
 desc=高速文件查找
 group=system
 
@@ -351,6 +406,10 @@ packages=vim
 commands=vim
 track=latest
 deps=
+platforms=linux,win
+win_backend=winget
+win_packages=vim.vim
+win_commands=vim
 desc=Vim 编辑器
 group=editor
 

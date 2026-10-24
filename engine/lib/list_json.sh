@@ -17,7 +17,7 @@ list_json_catalog() {
     while IFS= read -r path; do
       [[ -n "$path" ]] && arts+=("$path")
     done < <(catalog_expand_artifacts "$id")
-    printf '{"id":"%s","group":"%s","type":"%s","backend":"%s","packages":"%s","version":"%s","track":"%s","commands":"%s","deps":"%s","desc":"%s","action":"%s","artifacts":%s,"sudo":%s}' \
+    printf '{"id":"%s","group":"%s","type":"%s","backend":"%s","packages":"%s","version":"%s","track":"%s","commands":"%s","deps":"%s","desc":"%s","action":"%s","artifacts":%s,"platforms":"%s","sudo":%s}' \
       "$(json_escape "$id")" \
       "$(json_escape "${CAT_GROUP[$id]:-}")" \
       "$(json_escape "${CAT_TYPE[$id]:-}")" \
@@ -30,6 +30,7 @@ list_json_catalog() {
       "$(json_escape "${CAT_DESC[$id]:-}")" \
       "$(json_escape "${CAT_ACTION[$id]:-}")" \
       "$(json_string_array "${arts[@]}")" \
+      "$(json_escape "${CAT_PLATFORMS[$id]:-linux}")" \
       "$(_json_bool "${CAT_SUDO[$id]:-0}")"
   done
   printf ']'

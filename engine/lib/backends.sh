@@ -8,7 +8,11 @@
 # ---------------------------------------------------------------------------
 
 # 已实现的后端。catalog_validate 与本表必须一致。
-declare -gA BACKEND_SUPPORTED=([apt]=1 [npm]=1 [snap]=1)
+# apt / npm / snap 由本文件（Bash 引擎）实现；
+# winget / builtin 只由 Windows 引擎 engine/lib-win/backends.ps1 实现，
+# 在此登记名称是为了让共享 catalog 能写 win_backend=winget 而不被校验拒绝，
+# 并让 --pick winget:xxx 解析到分派期才明确报错（而不是被正则静默拒绝）。
+declare -gA BACKEND_SUPPORTED=([apt]=1 [npm]=1 [snap]=1 [winget]=1 [builtin]=1)
 
 _backend_require() {
   local c

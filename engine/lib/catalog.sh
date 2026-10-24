@@ -8,6 +8,26 @@ declare -gA CAT_COMMANDS=() CAT_TRACK=() CAT_DEPS=() CAT_DESC=()
 declare -gA CAT_GROUP=() CAT_ACTION=() CAT_ARTIFACTS=() CAT_SUDO=()
 declare -ga CAT_ORDER=()
 
+# ---------------------------------------------------------------------------
+# 平台相关字段（Windows 引擎 setup.ps1 读取；Bash 引擎只解析、不参与逻辑）
+#
+#   platforms    = linux | win | linux,win   （缺省 linux）
+#   win_backend  = winget | builtin | npm
+#   win_packages = winget 包 id（空格分隔；与 apt 包名不同）
+#   win_commands = Windows 上的验证命令（缺省回落 commands）
+#   win_version  = Windows 上锁定的版本（缺省回落 version）
+#   win_artifacts= Windows 上的产物路径（展开规则同 artifacts）
+#   win_deps     = 仅 Windows 生效的额外依赖
+#   win_action   = Windows 上使用的动作脚本名（缺省回落 action）
+#
+# Bash 引擎故意不校验这些字段的内容：跨平台白名单（winget/builtin）只在
+# Windows 侧有意义，在这里校验会逼迫 Linux 引擎认识它不实现的后端。
+# 缺少 platforms 的条目在 Windows 上被视为不适用并被跳过。
+# ---------------------------------------------------------------------------
+declare -gA CAT_PLATFORMS=() CAT_WIN_BACKEND=() CAT_WIN_PACKAGES=()
+declare -gA CAT_WIN_COMMANDS=() CAT_WIN_VERSION=() CAT_WIN_ARTIFACTS=()
+declare -gA CAT_WIN_DEPS=() CAT_WIN_ACTION=()
+
 CATALOG_DIR="${CATALOG_DIR:-$PROJECT_DIR/catalog}"
 CATALOG_FILE=""
 
@@ -15,6 +35,9 @@ catalog_reset() {
   CAT_TYPE=() CAT_BACKEND=() CAT_PACKAGES=() CAT_VERSION=()
   CAT_COMMANDS=() CAT_TRACK=() CAT_DEPS=() CAT_DESC=()
   CAT_GROUP=() CAT_ACTION=() CAT_ARTIFACTS=() CAT_SUDO=()
+  CAT_PLATFORMS=() CAT_WIN_BACKEND=() CAT_WIN_PACKAGES=()
+  CAT_WIN_COMMANDS=() CAT_WIN_VERSION=() CAT_WIN_ARTIFACTS=()
+  CAT_WIN_DEPS=() CAT_WIN_ACTION=()
   CAT_ORDER=()
 }
 
@@ -40,6 +63,26 @@ catalog_expand_vars() {
 _catalog_valid_id() { [[ "$1" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }
 # 包名会做词拆分后传给 apt/npm/snap：不得含空白，也不得以 - 开头（避免参数注入）。
 _catalog_valid_pkg_spec() { [[ "$1" =~ ^[A-Za-z0-9@][A-Za-z0-9._+/@=:~-]*$ ]]; }
+
+# _catalog_backend_supported <backend> —— 该后端名是否已登记
+#
+# 正常路径读 BACKEND_SUPPORTED（engine/lib/backends.sh），避免两处白名单不一致。
+# 但 catalog.sh 是可以单独 source 的数据层解析器，未加载 backends.sh 时
+# BACKEND_SUPPORTED 整个数组不存在——bash 5.2 在 set -u 下访问未声明关联数组的
+# 下标会直接报 "unbound variable"（已实测），因此这里显式判断数组是否已声明，
+# 未声明时退回内置列表。setup.sh 与 tests/run.sh 都会先加载 backends.sh，
+# 走的是第一条分支。
+_catalog_backend_supported() {
+  local b="$1"
+  if declare -p BACKEND_SUPPORTED >/dev/null 2>&1; then
+    [[ -n "${BACKEND_SUPPORTED[$b]+x}" ]] && return 0
+    return 1
+  fi
+  case "$b" in
+    apt|npm|snap|winget|builtin) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # catalog_define <id> —— 为临时（profile 内联 backend:spec）工具注册条目
 catalog_define_adhoc() {
@@ -71,6 +114,18 @@ catalog_define_adhoc() {
   CAT_ACTION[$id]=""
   CAT_ARTIFACTS[$id]=""
   CAT_SUDO[$id]=0
+  # 内联条目在两个平台都可用：用户在 Windows 上手写 winget:xxx 是常见用法。
+  # 必须是空格分隔：catalog_load_file 把 platforms 的逗号规范化成空格，
+  # _engine_platform_ok 按空格分词匹配。这里写逗号会让 " linux,win " 既不含
+  # " linux " 也不含 " win "，内联工具在两个引擎上都被平台门静默跳过。
+  CAT_PLATFORMS[$id]="linux win"
+  CAT_WIN_BACKEND[$id]="$backend"
+  CAT_WIN_PACKAGES[$id]="$packages"
+  CAT_WIN_COMMANDS[$id]="$commands"
+  CAT_WIN_VERSION[$id]=""
+  CAT_WIN_ARTIFACTS[$id]=""
+  CAT_WIN_DEPS[$id]=""
+  CAT_WIN_ACTION[$id]=""
 }
 
 # catalog_load_file <file>
@@ -106,6 +161,15 @@ catalog_load_file() {
       CAT_ACTION[$id]=""
       CAT_ARTIFACTS[$id]=""
       CAT_SUDO[$id]=0
+      # 平台字段：缺省 linux（未声明的条目在 Windows 上不适用，由 Windows 引擎跳过）
+      CAT_PLATFORMS[$id]="linux"
+      CAT_WIN_BACKEND[$id]=""
+      CAT_WIN_PACKAGES[$id]=""
+      CAT_WIN_COMMANDS[$id]=""
+      CAT_WIN_VERSION[$id]=""
+      CAT_WIN_ARTIFACTS[$id]=""
+      CAT_WIN_DEPS[$id]=""
+      CAT_WIN_ACTION[$id]=""
       seen_key=()
       continue
     fi
@@ -118,8 +182,9 @@ catalog_load_file() {
     # desc/group 是给人看的文案，不做变量展开：文案里的 $ 不应被静默改写。
     # artifacts 也不在这里展开：它由 catalog_expand_artifacts 在使用时展开，
     # 否则同一个路径会被展开两次（值里再出现 $ 就会被二次解释）。
+    # win_artifacts 同理（${PSPROFILE} 这类标记只在 Windows 侧解析）。
     case "$key" in
-      desc|group|artifacts) ;;
+      desc|group|artifacts|win_artifacts) ;;
       *) value="$(catalog_expand_vars "$value")" ;;
     esac
     [[ -n "${seen_key[$key]+x}" ]] && { log_error "catalog 键重复：$file:$line_no（$id.$key）"; return 1; }
@@ -138,6 +203,17 @@ catalog_load_file() {
       action)    CAT_ACTION[$id]="$value" ;;
       artifacts) CAT_ARTIFACTS[$id]="$value" ;;
       sudo)      CAT_SUDO[$id]="$value" ;;
+      # 平台字段：Bash 引擎只存储，不参与校验与逻辑（见文件头说明）。
+      # platforms 与 deps 同样把逗号规范化成空格，保证 Windows 引擎
+      # （engine/lib-win/Catalog.ps1）读到的值一致，--list --json 可逐字段比对。
+      platforms)     CAT_PLATFORMS[$id]="${value//,/ }" ;;
+      win_backend)   CAT_WIN_BACKEND[$id]="$value" ;;
+      win_packages)  CAT_WIN_PACKAGES[$id]="$value" ;;
+      win_commands)  CAT_WIN_COMMANDS[$id]="$value" ;;
+      win_version)   CAT_WIN_VERSION[$id]="$value" ;;
+      win_artifacts) CAT_WIN_ARTIFACTS[$id]="$value" ;;
+      win_deps)      CAT_WIN_DEPS[$id]="${value//,/ }" ;;
+      win_action)    CAT_WIN_ACTION[$id]="$value" ;;
       *) log_error "catalog 未知字段：$file:$line_no（$id.$key）"; return 1 ;;
     esac
   done <"$file"
@@ -163,10 +239,15 @@ catalog_validate() {
     type="${CAT_TYPE[$id]}"
     case "$type" in
       package)
-        case "${CAT_BACKEND[$id]}" in
-          apt|npm|snap) ;;
-          *) log_error "catalog [$id] backend 非法：${CAT_BACKEND[$id]:-<空>}（应为 apt/npm/snap）"; return 1 ;;
-        esac
+        # 与 BACKEND_SUPPORTED（engine/lib/backends.sh）保持一致：
+        # apt/npm/snap 由 Bash 引擎实现，winget/builtin 只由 Windows 引擎实现。
+        # 此处放行五个名字，让共享 catalog 可写 backend=winget；在 Linux 上
+        # 遇到未实现的后端会在 backend_dispatch 明确报错（rc 2）。
+        backend="${CAT_BACKEND[$id]}"
+        _catalog_backend_supported "$backend" || {
+          log_error "catalog [$id] backend 非法：${backend:-<空>}（应为 apt/npm/snap/winget/builtin）"
+          return 1
+        }
         [[ -n "${CAT_PACKAGES[$id]}" ]] || { log_error "catalog [$id] 缺少 packages"; return 1; }
         ;;
       config)

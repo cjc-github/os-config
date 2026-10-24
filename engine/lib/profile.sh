@@ -124,9 +124,13 @@ profile_resolve() {
       *:*)
         backend="${token%%:*}"
         spec="${token#*:}"
+        # apt/npm/snap 由 Bash 引擎实现；winget/builtin 只由 Windows 引擎
+        # （engine/lib-win/backends.ps1）实现。这里放行全部五个名字，使同一份
+        # catalog/profile 可以跨平台书写；在 Linux 上遇到 winget 会在分派时
+        # 明确报「不支持的 backend」（rc 2），比在解析期拒绝更易排查。
         case "$backend" in
-          apt|npm|snap) ;;
-          *) log_error "profile [$name] 的 $token 后端非法（应为 apt/npm/snap）"; return 1 ;;
+          apt|npm|snap|winget|builtin) ;;
+          *) log_error "profile [$name] 的 $token 后端非法（应为 apt/npm/snap/winget/builtin）"; return 1 ;;
         esac
         [[ -n "$spec" ]] || { log_error "profile [$name] 的 $token 缺少包名"; return 1; }
         id="$(printf '%s' "$spec" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_-' '-')"
