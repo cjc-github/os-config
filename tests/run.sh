@@ -12,6 +12,18 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_BIN="$(command -v node || true)"
+# Windows 上常常只有 `python` 没有 `python3`；更坑的是 Microsoft Store 的
+# python3 存根——文件在 PATH 里、command -v 找得到，一执行却退出 49 不干活。
+# 所以不能只看存在性，必须真的跑一次；用例里凡是"借 Python 当测试工具"的
+# 地方都走 $PY_BIN，不要直接写 python3。
+# 注意：test_ui_launcher 里刻意造的 $crashbin/python3 假命令不受此影响——
+# 那几处测的是 ui.sh 自己的行为，仍须用 python3 这个名字。
+PY_BIN=""
+for _pycand in python3 python py; do
+  _pypath="$(command -v "$_pycand" || true)"
+  [[ -n "$_pypath" ]] || continue
+  if "$_pypath" -c 'import sys' >/dev/null 2>&1; then PY_BIN="$_pypath"; break; fi
+done
 PASS=0
 FAIL=0
 FILTER="${1:-}"
@@ -377,7 +389,7 @@ test_syntax() {
   done < <(find "$ROOT/engine" "$ROOT/tests" -type f -name '*.sh' -print0)
   bash -n "$ROOT/setup.sh" 2>/dev/null || { rc=1; not_ok "语法错误：setup.sh"; }
   bash -n "$ROOT/ui.sh" 2>/dev/null || { rc=1; not_ok "语法错误：ui.sh"; }
-  python3 -m py_compile "$ROOT"/ui/*.py 2>/dev/null || { rc=1; not_ok "Python 语法错误：ui/*.py"; }
+  "$PY_BIN" -m py_compile "$ROOT"/ui/*.py 2>/dev/null || { rc=1; not_ok "Python 语法错误：ui/*.py"; }
   (( rc == 0 )) && ok
   return 0
 }
@@ -1132,6 +1144,29 @@ test_engine_dry_run() {
   assert_rc_eq 0 "$rc" "dry-run 返回 0"
   assert_contains "$out" "dry-run" "dry-run 提示"
   assert_file_missing "$TESTDIR/marker" "dry-run 不产生写操作"
+}
+
+# 回归：内联（backend:spec）注册的临时条目必须能过平台门。
+# catalog_define_adhoc 曾把 platforms 写成 "linux,win"（逗号），而
+# catalog_load_file 把文件里的 platforms 规范化成空格、_engine_platform_ok
+# 按空格分词匹配——"linux,win" 既不含 " linux " 也不含 " win "，
+# 于是 --pick apt:xxx / winget:xxx 在两个引擎上都被平台门静默跳过，
+# 跑起来是"成功 0 / 跳过 1"，用户以为装上了其实什么都没发生。
+test_engine_adhoc_not_skipped_by_platform_gate() {
+  catalog_load "$ROOT/catalog" >/dev/null 2>&1
+  resolve_inline 'apt:my-tool' || { not_ok "内联解析失败"; return 0; }
+  assert_eq "linux win" "${CAT_PLATFORMS[my-tool]}" "adhoc platforms 用空格分隔"
+  local out rc
+  DRY_RUN=1
+  out=$(engine_run install my-tool 2>&1); rc=$?
+  DRY_RUN=0
+  assert_rc_eq 0 "$rc" "内联条目 dry-run 返回 0"
+  assert_contains "$out" "将执行 install" "内联条目未被平台门跳过"
+  if [[ "$out" == *"不适用于当前平台"* ]]; then
+    not_ok "内联条目被平台门跳过"
+  else
+    ok
+  fi
 }
 
 test_engine_nosudo_skip() {
@@ -2143,7 +2178,7 @@ test_events_emit() {
   : >"$OS_CONFIG_EVENTS"
   events_emit run_start '"verb":"install","ids":["a"]'
   events_emit item_end '"id":"a","status":"ok","rc":0'
-  local out; out=$(python3 - "$OS_CONFIG_EVENTS" <<'PY'
+  local out; out=$("$PY_BIN" - "$OS_CONFIG_EVENTS" <<'PY'
 import json,sys
 rows=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]
 assert len(rows)==2, rows
@@ -2198,7 +2233,7 @@ test_list_json() {
   out=$(bash "$ROOT/setup.sh" --list --json 2>/dev/null); rc=$?
   assert_rc_eq 0 "$rc" "--list --json 返回 0"
   local parsed
-  parsed=$(python3 - "$out" <<'PY'
+  parsed=$("$PY_BIN" - "$out" <<'PY'
 import json,sys
 d=json.loads(sys.argv[1])
 assert len(d["catalog"])==56, len(d["catalog"])
@@ -2229,7 +2264,7 @@ PY
 test_list_json_profile_mktemp_failure_reports_error() {
   local out parsed
   out="$(TMPDIR="$TESTDIR/no-such-tmpdir" bash "$ROOT/setup.sh" --list --json 2>/dev/null)"
-  parsed=$(python3 - "$out" <<'PY'
+  parsed=$("$PY_BIN" - "$out" <<'PY'
 import json,sys
 d=json.loads(sys.argv[1])
 profs={p["name"]:p for p in d["profiles"]}
@@ -2256,8 +2291,8 @@ test_ui_launcher() {
   assert_rc_eq 2 "$rc" "未知参数返回 2"
   # 端口已被占用时必须直接失败，不能连到别人的服务还打印成功地址。
   local port holder
-  port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
-  python3 - "$port" <<'PY' &
+  port=$("$PY_BIN" -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+  "$PY_BIN" - "$port" <<'PY' &
 import socket, sys, time
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2278,7 +2313,7 @@ PY
   real_py="$(command -v python3)"
   crashbin="$TESTDIR/crashbin"
   mkdir -p "$crashbin"
-  port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+  port=$("$PY_BIN" -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
   cat >"$TESTDIR/crash_server.py" <<'PY'
 import socket, sys, time
 args = sys.argv[1:]
@@ -2306,7 +2341,7 @@ EOF
   local oldbin
   oldbin="$TESTDIR/oldpy"
   mkdir -p "$oldbin"
-  port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+  port=$("$PY_BIN" -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
   cat >"$oldbin/python3" <<'EOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "-c" ]]; then printf '3.9\n'; exit 0; fi
@@ -2342,7 +2377,7 @@ test_engine_events() {
   engine_run install testfake >/dev/null 2>&1; rc=$?
   assert_rc_eq 0 "$rc" "engine 成功"
   local out
-  out=$(python3 - "$OS_CONFIG_EVENTS" <<'PY'
+  out=$("$PY_BIN" - "$OS_CONFIG_EVENTS" <<'PY'
 import json,sys
 rows=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]
 ev=[r["event"] for r in rows]
@@ -2372,11 +2407,15 @@ test_engine_events_rollback() {
   register_rollback "$f"; printf new >"$f"
   rollback_on_exit 1
   local out
-  out=$(python3 - "$OS_CONFIG_EVENTS" "$f" <<'PY'
-import json,sys
+  out=$("$PY_BIN" - "$OS_CONFIG_EVENTS" "$f" <<'PY'
+import json,sys,os
 rows=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]
 rb=[r for r in rows if r["event"]=="rollback"]
-assert len(rb)==1 and rb[0]["restored"]==[sys.argv[2]], rb
+# 只比 basename：Git Bash 会把路径型参数翻译成 Windows 形式（/tmp/x → C:/.../Temp/x）
+# 再交给原生 python，而事件文件里记的是 bash 看到的 MSYS 路径，两边字面不同。
+# 用 basename 断言"回滚的正是这个文件"，不依赖路径的表示形式。
+assert len(rb)==1, rb
+assert [os.path.basename(p) for p in rb[0]["restored"]]==[os.path.basename(sys.argv[2])], rb
 print("ok")
 PY
 )
@@ -2394,7 +2433,7 @@ test_setup_run_end() {
 
 test_ui_python_suite() {
   local out rc
-  out=$(cd "$ROOT" && python3 -m unittest tests/test_ui_server.py 2>&1); rc=$?
+  out=$(cd "$ROOT" && "$PY_BIN" -m unittest tests/test_ui_server.py 2>&1); rc=$?
   assert_rc_eq 0 "$rc" "Python UI 测试通过"
   assert_contains "$out" "OK" "Python UI 测试输出 OK"
 }
@@ -2556,6 +2595,603 @@ test_export_profile_name_from_path() {
   assert_contains "$(cat "$TESTDIR/profiles/gen.conf")" "[gen]" "profile 名取自文件名"
 }
 
+# 回归：export 产出的 profile 必须能被 profile_load_file 原样读回。
+# 曾经 Export.ps1 的说明行漏了 '# ' 前缀，生成的文件被解析器判为
+# 「键值出现在任何 [名字] 段之前」，于是 export 的产物自己就用不了。
+# 只断言"包含 [gen]"抓不到这类问题——文件必须真的过一遍解析器。
+test_export_output_roundtrips_through_parser() {
+  catalog_reset
+  register_pkg_tool pkg-a apt "a"
+  register_pkg_tool pkg-b apt "b"
+  register_config_tool cfg-a cfga
+  printf 'a\nb\n' >"$TESTDIR/apt-installed"
+  state_record cfg-a cfga ~/.cfg-a
+  EXPORT_OUTPUT="$TESTDIR/rt.conf"
+  export_run >/dev/null 2>&1
+  assert_file_exists "$TESTDIR/rt.conf" "生成了 profile"
+
+  # 每个非注释、非空行都必须落在某个 [名字] 段内：这是解析器的硬约束
+  local bad_line
+  bad_line="$(awk '
+    /^[[:space:]]*$/ { next }
+    /^[[:space:]]*#/  { next }
+    /^\[[^]]+\]$/    { insec = 1; next }
+    { if (!insec) print NR": "$0 }
+  ' "$TESTDIR/rt.conf")"
+  assert_eq "" "$bad_line" "导出文件中没有段外键值行"
+
+  profile_reset
+  local rc
+  profile_load_file "$TESTDIR/rt.conf" >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "导出文件可被 profile_load_file 解析"
+  # export.sh 用 ", " 连接，这里同样按 ", " 归一化后再比对
+  assert_eq "pkg-a pkg-b cfg-a" "${PROF_TOOLS[rt]//, / }" "tools 原样读回"
+}
+
+# 回归：profiles 目录里只要有一个文件解析失败，整目录加载就中止，
+# 排在其后的 profile（如 default 依赖的 minimal）全部读不到，
+# 于是 default/dev 报「extends 指向未知 profile」。export 的默认产物
+# exported.conf 正好按字母序排在 minimal 之前，最容易被这条路径坑到。
+test_exported_profile_does_not_break_sibling_profiles() {
+  local dir="$TESTDIR/profiles" rc
+  mkdir -p "$dir"
+  printf '[base]\ntools=git-cli\n' >"$dir/aa-base.conf"
+  printf '[default]\nextends=base\ntools=ssh\n' >"$dir/bb-default.conf"
+
+  catalog_reset
+  register_pkg_tool pkg-a apt "a"
+  printf 'a\n' >"$TESTDIR/apt-installed"
+  EXPORT_OUTPUT="$dir/zz-exported.conf"
+  export_run >/dev/null 2>&1
+  assert_file_exists "$dir/zz-exported.conf" "导出到同一目录"
+
+  profile_reset
+  profile_load "$dir" >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "含导出产物的 profiles 目录仍可整体加载"
+  assert_eq "git-cli ssh" "$(profile_tokens default | tr '\n' ' ' | sed 's/ $//')" \
+    "default 仍能解析出 extends 链上的工具"
+}
+
+# ===========================================================================
+# Windows 引擎用例（有 PowerShell/pwsh 才跑；探针脚本直接点源 lib-win）
+#
+# 【写探针的铁律】heredoc 生成的 .ps1 必须是纯 ASCII：
+# bash 写出来的是 LF 行尾、无 BOM，PowerShell 5.1 会按 ANSI 代码页读，
+# 中文被啃成乱码后**可能**（取决于字节序列与位置）直接解析失败——
+# 症状是探针零输出、断言全红，而错误信息根本不指向编码。
+# 需要说明的地方写在 bash 侧注释里，heredoc 内只放 ASCII。
+# ===========================================================================
+
+# 回归：Windows 引擎（setup.ps1）导出的 profile 同样要能被读回。
+# 只在有 PowerShell 时运行；没有时记一条通过，避免用例因零断言而失败。
+test_win_export_roundtrip() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows 导出用例" true
+    return 0
+  fi
+
+  local out="$TESTDIR/win-exported.conf" rc
+  "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ROOT/setup.ps1" \
+    export --output "$out" >/dev/null 2>&1; rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    # Windows 专属依赖（winget 等）缺失时不算本用例失败
+    assert_true "setup.ps1 export 因环境不可用而跳过（rc=$rc）" true
+    return 0
+  fi
+  assert_file_exists "$out" "setup.ps1 export 生成文件"
+
+  profile_reset
+  profile_load_file "$out" >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "Windows 导出的 profile 可被 Bash 解析器读回"
+
+  # 生成的 profile 还要能真的被两个引擎各自加载一次
+  local dir="$TESTDIR/winprofiles"
+  mkdir -p "$dir"
+  cp -- "$out" "$dir/win.conf"
+  printf '[base]\ntools=git-cli\n' >"$dir/aa-base.conf"
+  profile_reset
+  profile_load "$dir" >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "Windows 导出产物不破坏同目录其它 profile"
+}
+
+# 回归：curl / wget 在 PowerShell 里是 Invoke-WebRequest 的内置别名，
+# 裸 Get-Command 会先把命令名解析到别名，于是「没装」被判成「已装」。
+# wget 是现成的探针：本机没有 wget.exe，但裸 Get-Command 因别名返回 $true。
+test_win_command_exists_ignores_aliases() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过别名用例" true
+    return 0
+  fi
+  # 直接在引擎自己的 Util.ps1 上调用，避免起整个 setup.ps1
+  local script="$TESTDIR/probe.ps1"
+  cat >"$script" <<'PS'
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Log.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Util.ps1')
+foreach ($n in @('wget')) {
+  $engine = Test-CommandExists -Name $n
+  $bare   = [bool](Get-Command -Name $n -ErrorAction SilentlyContinue)
+  Write-Host ("{0}|{1}|{2}" -f $n, $engine, $bare)
+}
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  # 引擎必须说 False（没有 wget.exe），而裸 Get-Command 因别名说 True
+  assert_contains "$out" "wget|False|True" "Test-CommandExists 不把别名当成已安装"
+}
+
+# 回归：setup.ps1 --list --json 的 artifacts 必须走 win_artifacts ?: artifacts，
+# 且同行多路径要按词拆成多个数组元素（与 Bash 版逐字段可比）。
+# 曾经的实现直接读 CAT_ARTIFACTS 并按换行拆分：proxy 把 Linux 的 ~/.bashrc
+# 暴露给 Windows 的 Web UI；git 的第二个 ~/.config 不展开，还和第一个挤在
+# 同一个字符串里；${PSPROFILE}/${HOME} 也被 Expand-CatalogVars 提前吞成空串。
+test_win_list_json_artifacts() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows list --json 用例" true
+    return 0
+  fi
+  local out rc
+  out="$(OSC_STATE_DIR="$TESTDIR/win-state" "$ps" -NoProfile -ExecutionPolicy Bypass \
+    -File "$ROOT/setup.ps1" --list --json 2>/dev/null)"; rc=$?
+  assert_rc_eq 0 "$rc" "setup.ps1 --list --json 返回 0"
+  local parsed
+  parsed=$("$PY_BIN" - "$out" <<'PY'
+import json,sys
+d=json.loads(sys.argv[1])
+by={x["id"]:x for x in d["catalog"]}
+# proxy：win_artifacts=${PSPROFILE} 必须胜出，而不是 Linux 的 ~/.bashrc
+pa=by["proxy"]["artifacts"]
+assert len(pa)==1 and ".bashrc" not in pa[0], pa
+assert pa[0].lower().endswith("microsoft.powershell_profile.ps1"), pa
+# git：同行两个路径必须拆成两个元素，~ 全部展开
+ga=by["git"]["artifacts"]
+assert len(ga)==2, ga
+assert not any("~" in a for a in ga), ga
+# nodejs：三个 win_artifacts，${HOME} 与 ${PSPROFILE} 都展开
+na=by["nodejs"]["artifacts"]
+assert len(na)==3, na
+assert not any("$" in a for a in na), na
+print("ok")
+PY
+)
+  assert_contains "$parsed" "ok" "Windows list --json 的 artifacts 展开正确"
+}
+
+# 回归：Windows 侧 rollback 事件必须存在、且带 restored 文件列表。
+# 曾经的实现调用一个不存在的 Emit-Event（真名是 Publish-Event），
+# restored 还恒为 []——回滚事件从未写出，Web UI 与 Bash 版也对不上。
+test_win_rollback_event_restored() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows rollback 事件用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-rollback.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Log.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Util.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Events.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\State.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Rollback.ps1')
+
+$dir = $env:OSC_TEST_DIR
+$null = Initialize-StatePaths -Dir (Join-Path $dir 'state')
+$script:EventsFile = Join-Path $dir 'events.jsonl'
+$script:VERB = 'install'
+
+$f1 = Join-Path $dir 'keep.txt'
+$f2 = Join-Path $dir 'new.txt'
+[System.IO.File]::WriteAllText($f1, 'original')
+$null = Register-Rollback -Path $f1
+$null = Register-Rollback -Path $f2
+[System.IO.File]::WriteAllText($f1, 'modified')
+[System.IO.File]::WriteAllText($f2, 'created')
+$null = Invoke-RollbackOnExit -Rc 1
+Write-Host ("restored1={0}" -f [System.IO.File]::ReadAllText($f1))
+Write-Host ("newgone={0}" -f (-not (Test-Path -LiteralPath $f2)))
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "restored1=original" "回滚后原文件内容恢复"
+  assert_contains "$out" "newgone=True" "回滚后新建文件被删除"
+  local parsed
+  parsed=$("$PY_BIN" - "$TESTDIR/events.jsonl" <<'PY'
+import json,sys,os
+rows=[json.loads(x) for x in open(sys.argv[1],encoding="utf-8") if x.strip()]
+rb=[r for r in rows if r["event"]=="rollback"]
+assert len(rb)==1, rows
+restored=rb[0]["restored"]
+assert len(restored)==2, restored
+assert sorted(os.path.basename(p) for p in restored)==["keep.txt","new.txt"], restored
+assert rb[0]["phase"]=="install", rb[0]
+print("ok")
+PY
+)
+  assert_contains "$parsed" "ok" "rollback 事件带 restored 列表"
+}
+
+# 回归：catalog 校验报错必须给出可读信息。
+# 曾经的实现两条错误消息引用未定义的 $rawBackend，Set-StrictMode 2.0 下
+# 变成"The variable '$rawBackend' cannot be retrieved"，真正的校验原因
+# 被淹没；事件仍能正确拒绝，但用户看到的是一堆乱码。
+test_win_catalog_missing_win_backend_message() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows catalog 校验用例" true
+    return 0
+  fi
+  local catdir="$TESTDIR/badcatalog"
+  mkdir -p "$catdir"
+  cat >"$catdir/test.catalog" <<'EOF'
+[good-one]
+type=package
+backend=winget
+packages=Good.One
+platforms=linux,win
+win_backend=winget
+win_packages=Good.One
+win_commands=good
+desc=合法条目
+
+[bad-one]
+type=package
+backend=winget
+packages=Bad.One
+platforms=linux,win
+desc=缺 win_backend 的条目
+EOF
+  local script="$TESTDIR/probe-catalog.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Log.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Util.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Catalog.ps1')
+$ok = Import-Catalog -Dir $env:OSC_TEST_CATALOG
+Write-Host ("import_ok={0}" -f $ok)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_CATALOG="$catdir" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "import_ok=False" "非法 catalog 被拒绝"
+  assert_contains "$out" "缺少 win_backend" "错误信息说明缺少 win_backend"
+  assert_contains "$out" "bad-one" "错误信息指出具体条目"
+  if [[ "$out" == *"cannot be retrieved"* ]]; then
+    not_ok "错误信息被 strict mode 变量错误污染"
+  else
+    ok
+  fi
+}
+
+# 回归：config 动作必须真的分派到动作脚本里的函数，而不是回退到通用 status。
+# Windows 引擎曾在函数内点源动作脚本——PowerShell 的函数内点源只把定义
+# 放进该函数自己的作用域，函数返回即消失。后果是分派时找不到
+# action_<x>_<verb>：apply/remove/verify 报"不支持动词"，status 又静默
+# 回退到通用输出，整个 config 动作层失效且没有显式错误。
+# 选 ssh 作探针：依赖 openssh-client 是 builtin 后端（系统自带），不依赖
+# winget；action_ssh_status 只判断密钥文件是否存在，无外部命令依赖。
+test_win_action_dispatch_uses_action_script() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows 动作分派用例" true
+    return 0
+  fi
+  local out rc
+  out="$(OSC_STATE_DIR="$TESTDIR/win-state" "$ps" -NoProfile -ExecutionPolicy Bypass \
+    -File "$ROOT/setup.ps1" status --pick ssh 2>/dev/null)"; rc=$?
+  assert_rc_eq 0 "$rc" "setup.ps1 status --pick ssh 返回 0"
+  assert_contains "$out" "status 汇总" "引擎跑完出汇总"
+  if [[ "$out" == *"config:ssh"* ]]; then
+    not_ok "status 回退到了通用输出（动作脚本未加载）"
+  else
+    ok
+  fi
+  if [[ "$out" == *"不支持动词"* ]]; then
+    not_ok "分派报动作不支持动词（动作脚本未加载）"
+  else
+    ok
+  fi
+  if [[ "$out" == *"已生成"* || "$out" == *"未生成"* ]]; then
+    ok
+  else
+    not_ok "status 输出来自动作脚本自身"
+  fi
+}
+
+# 回归：默认配置（SSH_KEY_PASSPHRASE 未设置 → 空口令）下 ssh 动作必须能生成密钥。
+# PowerShell 5.1 用调用运算符执行原生程序时会丢弃空字符串参数：
+# `& ssh-keygen -N '' ...` 传给 ssh-keygen 的是 -N -C ...，程序报
+# "Too many arguments"——默认路径整个失效，且错误信息完全指错方向。
+# 修法：Invoke-NativeStep 用 ProcessStartInfo 自拼命令行，空参数是 ""。
+# 整个 install 跑在沙箱 HOME 里（USERPROFILE 重定向），不碰真实 ~/.ssh。
+test_win_ssh_keygen_empty_passphrase() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows ssh-keygen 用例" true
+    return 0
+  fi
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    assert_true "无 ssh-keygen，跳过 Windows ssh-keygen 用例" true
+    return 0
+  fi
+  # 必须用系统原生的 ssh-keygen：Git Bash 的 PATH 里 Git 自带的 MSYS2 版排在
+  # 前面，而它不做 Windows ACL 加固（私钥 ACL 全继承、含 CodexSandboxUsers 之
+  # 类的组），动作的 ACL 校验会按"过松"失败。真实 Windows 终端里 System32 的
+  # 原生版本来就优先，这里按真实顺序跑，顺带覆盖"原生版写严格 ACL"这条路径。
+  local nativedir="/c/Windows/System32/OpenSSH"
+  if [[ ! -x "$nativedir/ssh-keygen.exe" ]]; then
+    assert_true "无原生 ssh-keygen，跳过 Windows ssh-keygen 用例" true
+    return 0
+  fi
+  local home="$TESTDIR/winhome"
+  mkdir -p "$home"
+  local out rc
+  out="$(USERPROFILE="$home" OSC_STATE_DIR="$TESTDIR/win-state" \
+    OSC_CONFIG_EVENTS="$TESTDIR/events.jsonl" PATH="$nativedir:$PATH" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ROOT/setup.ps1" \
+    install --pick ssh 2>/dev/null)"; rc=$?
+  assert_rc_eq 0 "$rc" "setup.ps1 install --pick ssh 返回 0"
+  assert_file_exists "$home/.ssh/id_ed25519" "空口令下私钥被生成"
+  assert_file_exists "$home/.ssh/id_ed25519.pub" "空口令下公钥被生成"
+  assert_contains "$out" "SSH 密钥就绪" "动作报告密钥就绪"
+  assert_contains "$(cat "$TESTDIR/win-state/manifest.conf" 2>/dev/null)" "ssh|" "清单记录 ssh"
+
+  # verify 必须认这把钥匙（存在性 + ACL），remove 必须按记录删掉
+  out="$(USERPROFILE="$home" OSC_STATE_DIR="$TESTDIR/win-state" \
+    PATH="$nativedir:$PATH" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ROOT/setup.ps1" \
+    verify --pick ssh 2>/dev/null)"; rc=$?
+  assert_rc_eq 0 "$rc" "verify 认可生成的密钥"
+  out="$(USERPROFILE="$home" OSC_STATE_DIR="$TESTDIR/win-state" \
+    PATH="$nativedir:$PATH" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ROOT/setup.ps1" \
+    remove --pick ssh --yes 2>/dev/null)"; rc=$?
+  assert_rc_eq 0 "$rc" "remove 返回 0"
+  assert_file_missing "$home/.ssh/id_ed25519" "remove 删掉生成的私钥"
+}
+
+# 回归：Invoke-NativeStep 必须把空串参数原样送进命令行。
+# 同样是 PowerShell 丢弃空参数的问题：git config --global <key> '' 若被丢掉
+# 空参数就退化成读操作——"还原一个原本未设置的值"静默失败且退出码为 0。
+# 探针：先把键设成非空，再用空串"还原"，最后读回来的必须是空而不是原值。
+test_win_native_step_empty_argument() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows 原生调用用例" true
+    return 0
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    assert_true "无 git，跳过 Windows 原生调用用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-native.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Log.ps1')
+. (Join-Path $env:OSC_PROJECT_DIR 'engine\lib-win\Util.ps1')
+$env:USERPROFILE = $env:OSC_TEST_DIR
+$env:HOME = $env:OSC_TEST_DIR
+# Empty element must become "" on the command line, not get dropped
+$s = ConvertTo-NativeArgumentString -Arguments @('config','--global','osc.testkey','')
+Write-Host ("cmdline={0}" -f $s)
+# Seed non-empty, then "restore" empty: delivered => reads back empty; dropped => keeps old value
+$null = Invoke-NativeStep -Description 'seed' -FileName 'git' -Arguments @('config','--global','osc.testkey','hello')
+$rc = Invoke-NativeStep -Description 'restore empty' -FileName 'git' -Arguments @('config','--global','osc.testkey','')
+$got = (& git config --global --get osc.testkey 2>$null | Out-String).Trim()
+Write-Host ("rc={0}" -f $rc)
+Write-Host ("got=[{0}]" -f $got)
+$null = Invoke-NativeStep -Description 'cleanup' -FileName 'git' -Arguments @('config','--global','--unset','osc.testkey')
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" 'cmdline="config" "--global" "osc.testkey" ""' "空参数被引用为空串"
+  assert_contains "$out" "rc=0" "git config 空值设置成功"
+  assert_contains "$out" "got=[]" "空参数真的送达（键被改成空串而非保持原值）"
+}
+
+# 回归：winget 安装必须真的把参数传给 winget.exe。
+# Invoke-WingetInstallImpl 曾把参数链表命名为 $args——PowerShell 的自动变量。
+# 函数里赋值虽然生效，但 Invoke-Step 的 -Script { & winget.exe @args } 里
+# $args 会重新绑定到**脚本块自己**的未绑定参数（空集合），于是 winget.exe
+# 以零参数运行：它打印帮助并退出 0，每次 install/update 都静默"成功"而
+# 什么都没装。mock 用 global:winget.exe 函数遮蔽外部命令来记录真实入参。
+test_win_winget_install_passes_arguments() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows winget 参数用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-winget.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+foreach ($m in @('Log','Util','Events','Catalog','Profile','Graph','State','Rollback','Backends','Engine','Doctor','Export','ListJson')) {
+  . (Join-Path $script:ProjectDir ("engine\lib-win\{0}.ps1" -f $m))
+}
+$actionFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:ProjectDir 'engine\actions-win') -Filter '*.ps1' -File | Sort-Object -Property Name)
+foreach ($af in $actionFiles) { . $af.FullName }
+$null = Import-Catalog
+$null = Import-Profile
+$script:EventsFile = ''
+$null = Initialize-StatePaths -Dir (Join-Path $env:OSC_TEST_DIR 'state')
+$script:HomeDir = $env:OSC_TEST_DIR
+
+$global:WingetLog = Join-Path $env:OSC_TEST_DIR 'winget.log'
+$global:WingetInstalled = @{}
+function global:winget.exe {
+  param([Parameter(ValueFromRemainingArguments=$true)][string[]]$WArgs)
+  $n = @($WArgs).Count
+  [System.IO.File]::AppendAllText($global:WingetLog, ("CALL n={0} args=[{1}]" -f $n, (@($WArgs) -join ' ')) + "`r`n", (New-Object System.Text.UTF8Encoding $false))
+  if ($n -eq 0) { $global:LASTEXITCODE = 0; return }
+  if ($WArgs[0] -eq 'list') {
+    for ($i = 0; $i -lt $n; $i++) {
+      if ($WArgs[$i] -eq '--id') {
+        $id = $WArgs[$i+1].ToLowerInvariant()
+        if ($global:WingetInstalled.ContainsKey($id)) {
+          Write-Output ("Fake   {0}   {1}   winget" -f $WArgs[$i+1], $global:WingetInstalled[$id])
+          $global:LASTEXITCODE = 0
+          return
+        }
+      }
+    }
+    $global:LASTEXITCODE = 20
+    return
+  }
+  if ($WArgs[0] -eq 'install') {
+    for ($i = 0; $i -lt $n; $i++) {
+      if ($WArgs[$i] -eq '--id') { $global:WingetInstalled[$WArgs[$i+1].ToLowerInvariant()] = '1.2.3' }
+    }
+  }
+  if ($WArgs[0] -eq 'uninstall') {
+    for ($i = 0; $i -lt $n; $i++) {
+      if ($WArgs[$i] -eq '--id') { $null = $global:WingetInstalled.Remove($WArgs[$i+1].ToLowerInvariant()) }
+    }
+  }
+  $global:LASTEXITCODE = 0
+}
+
+$rc1 = Invoke-EngineRun -Verb 'install' -Ids @('jq')
+$rc2 = Invoke-EngineRun -Verb 'install' -Ids @('jq')
+$rc3 = Invoke-EngineRun -Verb 'verify' -Ids @('jq')
+Write-Host ("rc1={0} rc2={1} rc3={2}" -f $rc1, $rc2, $rc3)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "rc1=0 rc2=0 rc3=1" "install 两次 + verify（jq 命令不在 PATH，verify 失败是对的）"
+  local log; log="$(cat "$TESTDIR/winget.log" 2>/dev/null)"
+  if [[ "$log" == *"CALL n=0 "* ]]; then
+    not_ok "winget.exe 收到了零参数调用（自动变量 args 陷阱）"
+  else
+    ok
+  fi
+  assert_contains "$log" "args=[install --exact --id jqlang.jq --source winget --silent" "install 带齐参数"
+  assert_contains "$log" "--scope user --no-upgrade]" "user 域 + --no-upgrade"
+  # 第二次 install 应只做一次已装查询，不再调用 install
+  local install_calls
+  install_calls="$(grep -c 'args=\[install ' "$TESTDIR/winget.log" 2>/dev/null || true)"
+  install_calls="${install_calls:-0}"
+  assert_eq "1" "$install_calls" "已安装后不重复 install"
+}
+
+# 回归：npm 安装遇到 ENOTEMPTY 必须清理残留后重试一次。
+# Install-NpmGlobalFixed 靠 $script:LastStepOutput 判断 ENOTEMPTY，
+# 而 Invoke-WithRetry 原先不捕获输出——LastStepOutput 永远是别处遗留的旧值，
+# 定向重试是死代码。mock 的 npm 第一次安装报 ENOTEMPTY，第二次成功。
+test_win_npm_enotempty_retry() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows npm 重试用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-npm.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+foreach ($m in @('Log','Util','Events','Catalog','Profile','Graph','State','Rollback','Backends','Engine','Doctor','Export','ListJson')) {
+  . (Join-Path $script:ProjectDir ("engine\lib-win\{0}.ps1" -f $m))
+}
+$actionFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:ProjectDir 'engine\actions-win') -Filter '*.ps1' -File | Sort-Object -Property Name)
+foreach ($af in $actionFiles) { . $af.FullName }
+$null = Import-Catalog
+$null = Import-Profile
+$script:EventsFile = ''
+$null = Initialize-StatePaths -Dir (Join-Path $env:OSC_TEST_DIR 'state')
+$script:HomeDir = $env:OSC_TEST_DIR
+
+$global:NpmLog = Join-Path $env:OSC_TEST_DIR 'npm.log'
+$global:NpmRoot = Join-Path $env:OSC_TEST_DIR 'npmroot'
+$global:NpmBin = Join-Path $global:NpmRoot 'bin'
+$global:NpmModules = Join-Path $global:NpmRoot 'lib\node_modules'
+$global:NpmResidue = Join-Path $global:NpmModules '.fake-pkg-abc123'
+$env:PATH = $global:NpmBin + ';' + $env:PATH
+function global:npm {
+  param([Parameter(ValueFromRemainingArguments=$true)][string[]]$NArgs)
+  [System.IO.File]::AppendAllText($global:NpmLog, ("args=[{0}]" -f (@($NArgs) -join ' ')) + "`r`n", (New-Object System.Text.UTF8Encoding $false))
+  if ($NArgs[0] -eq 'install') {
+    # Residue dir present => keep failing with ENOTEMPTY. Only a real cleanup
+    # can make this succeed, so the generic retry cannot mask the fix.
+    if (Test-Path -LiteralPath $global:NpmResidue) {
+      $null = New-Item -ItemType Directory -Path $global:NpmModules -Force
+      Write-Output "npm ERR! ENOTEMPTY: directory not empty, rename 'C:\x' -> 'C:\y'"
+      $global:LASTEXITCODE = 1
+      return
+    }
+    $null = New-Item -ItemType Directory -Path $global:NpmBin -Force
+    [System.IO.File]::WriteAllText((Join-Path $global:NpmBin 'fakecmd.cmd'), "@echo off`r`necho 9.9.9`r`n", (New-Object System.Text.UTF8Encoding $false))
+    $global:LASTEXITCODE = 0
+    return
+  }
+  if ($NArgs[0] -eq 'uninstall') {
+    try { Remove-Item -LiteralPath (Join-Path $global:NpmBin 'fakecmd.cmd') -Force -ErrorAction SilentlyContinue } catch { }
+    $global:LASTEXITCODE = 0
+    return
+  }
+  if ($NArgs[0] -eq 'config') { Write-Output $global:NpmRoot; $global:LASTEXITCODE = 0; return }
+  # npm root -g returns the node_modules dir; residue cleanup searches there
+  if ($NArgs[0] -eq 'root') { Write-Output $global:NpmModules; $global:LASTEXITCODE = 0; return }
+  $global:LASTEXITCODE = 0
+}
+# Pre-seed the residue dir: simulates a .<pkg>-* rename leftover from a prior failure
+$null = New-Item -ItemType Directory -Path $global:NpmResidue -Force
+
+$null = Register-CatalogAdhoc -Id 'fakepkg' -Backend 'npm' -Packages 'fake-pkg' -Commands 'fakecmd'
+$rc1 = Invoke-EngineRun -Verb 'install' -Ids @('fakepkg')
+$rc2 = Invoke-EngineRun -Verb 'install' -Ids @('fakepkg')
+$rc3 = Invoke-EngineRun -Verb 'verify' -Ids @('fakepkg')
+$rc4 = Invoke-EngineRun -Verb 'remove' -Ids @('fakepkg')
+Write-Host ("rc1={0} rc2={1} rc3={2} rc4={3}" -f $rc1, $rc2, $rc3, $rc4)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "rc1=0 rc2=0 rc3=0 rc4=0" "npm 四动词全绿（含 ENOTEMPTY 重试）"
+  local install_calls
+  install_calls="$(grep -c 'args=\[install ' "$TESTDIR/npm.log" 2>/dev/null || true)"
+  install_calls="${install_calls:-0}"
+  # 第一次 ENOTEMPTY + 修复重试 = 2 次；第二次 install 应命中幂等跳过
+  assert_eq "2" "$install_calls" "ENOTEMPTY 后重试一次，且重复 install 被幂等跳过"
+}
+
 test_doctor_runs_all_checks() {
   catalog_reset
   register_pkg_tool pkg-a apt "a"
@@ -2664,6 +3300,7 @@ run_test 'snap update 补装缺失包'                      test_snap_update_ins
 run_test 'engine config install'                       test_engine_config_apply
 run_test 'engine config remove'                        test_engine_config_remove
 run_test 'engine dry-run 不写盘'                       test_engine_dry_run
+run_test '内联条目不被平台门跳过'                      test_engine_adhoc_not_skipped_by_platform_gate
 run_test 'engine no-sudo 跳过'                         test_engine_nosudo_skip
 run_test 'engine 失败汇总返回 1'                       test_engine_failure
 run_test 'engine keep-going 返回非零'                   test_engine_keepgoing
@@ -2732,6 +3369,18 @@ run_test 'verify --fix 在 dry-run 下不修复'            test_engine_verify_f
 run_test 'export 生成 profile'                        test_export_writes_profile
 run_test 'export 空状态返回非零'                       test_export_empty_state_fails
 run_test 'export 文件名即 profile 名'                  test_export_profile_name_from_path
+run_test 'export 产物可被 profile 解析器读回'          test_export_output_roundtrips_through_parser
+run_test 'export 产物不破坏同目录其它 profile'         test_exported_profile_does_not_break_sibling_profiles
+run_test 'Windows 导出的 profile 可读回'              test_win_export_roundtrip
+run_test 'Windows 命令探测不把别名当已安装'            test_win_command_exists_ignores_aliases
+run_test 'Windows list --json 的 artifacts 展开'      test_win_list_json_artifacts
+run_test 'Windows rollback 事件带 restored 列表'      test_win_rollback_event_restored
+run_test 'Windows catalog 缺 win_backend 报错可读'    test_win_catalog_missing_win_backend_message
+run_test 'Windows config 动作真的被分派'              test_win_action_dispatch_uses_action_script
+run_test 'Windows 空口令下 ssh-keygen 可用'           test_win_ssh_keygen_empty_passphrase
+run_test 'Windows 原生调用保留空参数'                 test_win_native_step_empty_argument
+run_test 'Windows winget 安装真的传参数'               test_win_winget_install_passes_arguments
+run_test 'Windows npm ENOTEMPTY 重试'                 test_win_npm_enotempty_retry
 run_test 'doctor 跑完全部检查'                         test_doctor_runs_all_checks
 run_test 'doctor 提示清单产物缺失'                     test_doctor_manifest_missing_artifact_warns
 run_test '--fix 只能配 verify'                        test_setup_fix_requires_verify
