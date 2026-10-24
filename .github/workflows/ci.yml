@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Linux 跑全套：Bash 引擎回归 + Web UI 服务端 + 前端。
+  # Windows 引擎用例在找不到 powershell 时会自动记跳过，不会染红。
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash 引擎回归（catalog/profile/graph/state/rollback/后端/引擎/动作/锁/export/doctor）
+        run: ./tests/run.sh
+
+      - name: Web UI 服务端用例
+        run: python3 -m unittest tests/test_ui_server.py
+
+      - name: 前端用例
+        run: node --test tests/test_app_js.js
+
+  # Windows 只跑 Windows 引擎用例：Bash 套件里依赖 POSIX 权限位与符号链接的
+  # 用例在 NTFS 上必然失败（属环境差异，非缺陷），全量跑会染红。
+  # 这些用例自身会在没有 powershell 时记跳过，因此在 Linux 上也不会失败。
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Windows 引擎用例（setup.ps1 + lib-win + actions-win）
+        run: ./tests/run.sh Windows
+        shell: bash
