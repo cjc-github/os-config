@@ -77,22 +77,28 @@
 - **Windows 9 项** [Windows]：catalog 数据层、profiles 清单、提权身份、磁盘剩余、基础命令（curl/git）、winget 可用性与版本、代理连通性、清单与磁盘一致性、state 目录
 - 单项失败不中断序列；汇总“通过/需关注/未通过”，仅未通过项影响退出码
 
-## 七、Web UI（Bash 引擎）
+## 七、Web UI
 
-- 只监听本机（127.0.0.1/localhost），每次启动生成一次性 token；端口占用时直接失败
+- 启动器双平台：`ui.sh`（Linux）/ `ui.ps1`（Windows 原生）；服务端按平台自动
+  选择引擎（Windows 上跑 `setup.ps1`，其余跑 `setup.sh`），上层无需区分
+- 只监听本机（127.0.0.1/localhost），每次启动生成一次性 token；未带 token 的请求一律 401
 - catalog 浏览：分组、搜索/过滤、按条目勾选
 - profile 预设一键填入；adhoc 内联条目（`backend:包`）添加与校验
-- 参数面板：配置项实时编辑、密钥类字段一键清除开关
+- 参数面板：配置项实时编辑、密钥类字段一键清除开关；改动写入 `config/ui.env`（权限 0600）
 - 计划预览：dry-run 结果渲染（将执行的动作与顺序）
 - 执行与观测：实时事件流、按工具分组的日志区、日志复制/下载、按工具与阶段定位日志
 - 结果表：每项状态（ok/planned/skipped/failed）汇总；失败时展示回滚横幅
 - 卸载流程：已装列表 + 确认弹窗后执行 remove
 - 状态与历史：当前状态/已装视图、历史运行记录与日志回放
-- sudo 预授权与可用性检查
+- sudo 预授权与可用性检查（Linux）
 
 ## 八、测试与自测
 
 - 不依赖外部框架的回归套件：catalog 解析/校验、profile 继承与解析、依赖闭包、state 清单与锁、rollback、util（代理/重试/校验）、三个后端适配器（全部 fake）、引擎五动词编排、动作脚本接口与行为、并发锁、export、doctor、入口参数
-- Windows 引擎用例：导出的 profile 读回、别名探测、list --json 的 artifacts 展开、rollback 事件、catalog 校验报错、config 动作分派、空口令 ssh-keygen、原生调用空参数、winget 安装入参、npm ENOTEMPTY 重试；环境无 PowerShell 时自动记跳过
+- Windows 引擎用例（有 PowerShell 才跑，否则记跳过）：导出的 profile 读回、别名探测、list --json 的 artifacts 展开、rollback 事件、catalog 校验报错、config 动作分派、空口令 ssh-keygen（含沙箱 HOME 全生命周期）、原生调用空参数、winget 安装入参、winget 索引按表头解析、npm ENOTEMPTY 重试、proxy/git/nodejs 三动作全生命周期、非交互提权明确报错
+- 安装后端用函数遮蔽记录真实入参（`global:winget.exe` / `global:npm`），不真的装任何软件
+- Web UI 服务端用例（Python unittest）与前端用例（node --test）
+- 平台跳过：断言 POSIX 权限位/符号链接/原生 python3·node 的用例在 MSYS 下记 skip 并单独计数
 - 过滤按显示名或用例函数名；匹配不到任何用例时返回非零（不会“跑了 0 个却显示通过”）
+- CI：ubuntu 跑全套 + 服务端 + 前端；windows 跑 Windows 引擎用例
 - 测试全程在临时目录中进行：`HOME`/`STATE_DIR`/`PATH` 重定向，`apt-get`/`snap`/`npm`/`sudo`/`fuser`/`ping`/`ip`/`ssh-keygen` 均为 fake，不改动宿主机配置

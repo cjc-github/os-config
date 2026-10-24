@@ -177,9 +177,11 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 
 ```text
 setup.sh                 唯一入口（七动词）
-ui.sh                    Web UI 启动器（本机回环 + 一次性 token）
+setup.ps1                Windows 引擎入口（动词与选择参数同 setup.sh）
+ui.sh                    Web UI 启动器（Linux，本机回环 + 一次性 token）
+ui.ps1                   Web UI 启动器（Windows 原生）
 ui/                      Web UI 服务与静态资源（Python 标准库）
-  server.py              HTTP/SSE 服务、运行编排
+  server.py              HTTP/SSE 服务、运行编排（按平台选 setup.sh/setup.ps1）
   schema.py              参数白名单、adhoc id、路径与文件名校验
   static/                index.html / app.js / style.css
 catalog/                 声明式数据层：base.catalog、config.catalog
@@ -203,6 +205,7 @@ engine/
   actions-win/*.ps1      Windows 配置动作：proxy/git/ssh/nodejs
 state/                   运行时状态（manifest + 每动作持久备份 + .lock）
 tests/run.sh             不依赖 Bats 的回归测试（含 Windows 引擎用例，有 PowerShell 才跑）
+.github/workflows/ci.yml  CI：ubuntu 全套，windows 跑 Windows 引擎用例
 docs/DESIGN.md           详细设计
 docs/FEATURES.md         功能清单（当前已支持的能力，按平台标注）
 logs/                    运行时日志（.gitignore 忽略）
@@ -230,12 +233,21 @@ Windows 引擎同样有回归覆盖：`export 产物可被 profile 解析器读�
 `Windows rollback 事件带 restored 列表`、`Windows catalog 缺 win_backend 报错可读`、
 `Windows config 动作真的被分派`、`Windows 空口令下 ssh-keygen 可用`、
 `Windows 原生调用保留空参数`、`Windows winget 安装真的传参数`、
-`Windows npm ENOTEMPTY 重试`。后九条会在环境里找不到 `powershell`/`pwsh` 时
-自动记为跳过（仍留一条通过断言，避免零断言被误判成失败），因此在 Linux 上跑全套不会变红。
-winget / npm 两个安装后端用 `global:winget.exe` / `global:npm` 函数遮蔽外部命令
-来记录真实入参（PowerShell 函数优先于 PATH 上的可执行文件），不真的装任何软件。
+`Windows winget 索引按表头解析`、`Windows npm ENOTEMPTY 重试`、
+`Windows proxy 动作全生命周期`、`Windows git 动作全生命周期`、
+`Windows nodejs 动作全生命周期`、`Windows 非交互提权明确报错`。
+上述用例在环境里找不到 `powershell`/`pwsh` 时自动记为跳过（仍留一条通过断言，
+避免零断言被误判成失败）；winget / npm 两个安装后端用 `global:winget.exe` /
+`global:npm` 函数遮蔽外部命令来记录真实入参，不真的装任何软件。
 Bash 侧对应新增 `内联条目不被平台门跳过`（--pick backend:pkg 的临时条目曾被
 平台门静默跳过，两个引擎同病）。
+
+少数 Bash 用例断言 POSIX 权限位（600/700）、依赖符号链接或需要原生
+python3/node，在 Windows 的 Git Bash 上必然失败——那是环境差异而非缺陷，
+套件会按平台把它们记为 `skip` 并在总计里单独计数，不会染红。
+
+CI（`.github/workflows/ci.yml`）：ubuntu 跑全套 + Web UI 服务端 + 前端；
+windows 跑 Windows 引擎用例。
 
 测试全部在临时目录中进行：`HOME`、`STATE_DIR`、`PATH` 都被重定向，`apt-get`/`snap`/`npm`/`sudo`/`fuser`/`ping`/`ip` 均为 fake，不会改动宿主机 `/etc`。
 
