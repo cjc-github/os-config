@@ -253,6 +253,32 @@ function renderPreset() {
   });
 }
 
+// 分类标题行：类名 + 本类「全选 / 全不选」切换按钮。
+// ids 只传当前搜索过滤后仍可见的工具，行为与顶部全局全选保持一致。
+function groupHead(title, ids, rerender) {
+  const head = make("div", null, "tool-group-head");
+  head.appendChild(make("h3", title, "tool-group-title"));
+  if (!ids.length) return head;
+  const allOn = ids.every((id) => S.selection.has(id));
+  const btn = make("button", allOn ? "全不选" : "全选", "ghost tiny");
+  btn.type = "button";
+  btn.disabled = isBusy();
+  btn.title = allOn ? "取消选择本类全部工具" : "选择本类全部工具";
+  btn.classList.toggle("is-on", allOn);
+  btn.addEventListener("click", () => {
+    if (isBusy()) return;
+    const turnOn = !ids.every((id) => S.selection.has(id));
+    ids.forEach((id) => {
+      if (turnOn) S.selection.add(id);
+      else S.selection.delete(id);
+    });
+    rerender();
+    selectionChanged();
+  });
+  head.appendChild(btn);
+  return head;
+}
+
 function renderTools() {
   const list = $("tool-list");
   const query = ($("search").value || "").trim().toLowerCase();
@@ -266,10 +292,12 @@ function renderTools() {
   let shown = 0;
   groups.forEach((tools, groupName) => {
     const section = make("div", null, "tool-group");
-    section.appendChild(make("h3", groupName, "tool-group-title"));
-    tools.forEach((tool) => {
+    const visible = tools.filter((tool) => {
       const haystack = (tool.id + " " + (tool.desc || "")).toLowerCase();
-      if (query && haystack.indexOf(query) === -1) return;
+      return !query || haystack.indexOf(query) !== -1;
+    });
+    section.appendChild(groupHead(groupName, visible.map((tool) => tool.id), renderTools));
+    visible.forEach((tool) => {
       shown += 1;
       const line = make("label", null, "tool-row");
       const box = document.createElement("input");
@@ -294,9 +322,9 @@ function renderTools() {
   const adhoc = Array.from(S.selection).filter((token) => !catalogId(token));
   if (adhoc.length) {
     const section = make("div", null, "tool-group");
-    section.appendChild(make("h3", "内联包", "tool-group-title"));
-    adhoc.forEach((token) => {
-      if (query && token.toLowerCase().indexOf(query) === -1) return;
+    const visibleAdhoc = adhoc.filter((token) => !query || token.toLowerCase().indexOf(query) !== -1);
+    section.appendChild(groupHead("内联包", visibleAdhoc, renderTools));
+    visibleAdhoc.forEach((token) => {
       const line = make("label", null, "tool-row");
       const box = document.createElement("input");
       box.type = "checkbox";
@@ -314,7 +342,7 @@ function renderTools() {
       line.appendChild(make("span", token, "tool-id"));
       section.appendChild(line);
     });
-    list.appendChild(section);
+    if (section.querySelectorAll(".tool-row").length) list.appendChild(section);
   }
   if (!shown && !adhoc.length) list.appendChild(make("p", "没有匹配的工具", "hint"));
 }
@@ -1013,10 +1041,16 @@ function removeTargets() {
 function renderRemoveList() {
   const list = $("remove-list");
   clear(list);
+  const btn = $("remove-select-all");
   const targets = removeTargets();
   if (!targets.length) {
     list.appendChild(make("p", "没有可卸载的已安装工具", "hint"));
+    if (btn) btn.disabled = true;
     return;
+  }
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = "全选";
   }
   targets.forEach((entry) => {
     const line = make("label", null, "tool-row");
@@ -1296,6 +1330,13 @@ function wireEvents() {
   });
   $("verb").addEventListener("change", () => runPlan());
   $("remove-btn").addEventListener("click", openRemoveModal);
+  $("remove-select-all").addEventListener("click", () => {
+    const boxes = Array.from($("remove-list").querySelectorAll("input[type=\"checkbox\"]"));
+    if (!boxes.length) return;
+    const turnOn = !boxes.every((b) => b.checked);
+    boxes.forEach((b) => { b.checked = turnOn; });
+    $("remove-select-all").textContent = turnOn ? "全不选" : "全选";
+  });
   $("confirm-cancel").addEventListener("click", closeModal);
   $("confirm-modal").addEventListener("click", (ev) => {
     if (ev.target === $("confirm-modal")) closeModal();

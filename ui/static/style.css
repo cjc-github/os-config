@@ -271,6 +271,9 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 .tool-list { display: flex; flex-direction: column; gap: 10px; overflow: auto; }
 .tools-panel > .tool-list { flex: 1; min-height: 0; max-height: none; }
 .tool-group-title { font-size: 12px; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 4px; }
+.tool-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.tool-group-head .tool-group-title { margin: 0; }
+.tool-group-head button.is-on { color: var(--accent); border-color: var(--accent); }
 .tool-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; }
 .tool-row:hover { background: var(--bg); }
 .tool-text { display: flex; flex-direction: column; }
@@ -328,6 +331,7 @@ button.tiny { padding: 3px 8px; font-size: 12px; }
 
 .remove { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
 .remove summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.remove-head { display: flex; justify-content: flex-end; margin: 8px 0 4px; }
 .remove .tool-list { margin: 8px 0; max-height: 180px; }
 
 /* ---------- 运行详情：横向 tab ---------- */
