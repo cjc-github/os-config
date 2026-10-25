@@ -535,8 +535,12 @@ class Handler(BaseHTTPRequestHandler):
     def _api_sudo_check(self) -> None:
         available = self._sudo_available()
         installed = shutil.which("sudo") is not None
+        # platform 随响应下发：Windows 上前端据此隐藏 sudo 徽标——
+        # 那里没有 sudo 预授权概念（提权由引擎走 UAC），常驻徽标只会
+        # 显示一条没有信息量的「未安装 sudo」。字段缺失时前端按原逻辑走。
         self._send_json(HTTPStatus.OK,
-                        {"available": available, "sudo": installed})
+                        {"available": available, "sudo": installed,
+                         "platform": os.name})
 
     # -- plan / run ---------------------------------------------------------
     def _json_body(self) -> dict | None:

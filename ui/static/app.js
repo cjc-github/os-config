@@ -565,6 +565,14 @@ async function renderSudo() {
   const badge = $("sudo-badge");
   try {
     const data = await api("POST", "/api/sudo/check", {});
+    // Windows 没有 sudo 预授权概念（需要提权时由引擎自行走 UAC），
+    // 徽标整体隐藏，避免常驻一条没有信息量的「未安装 sudo」。
+    // 接口异常（catch）时保持原行为，如实报告状态未知。
+    if (data.platform === "nt") {
+      badge.hidden = true;
+      return;
+    }
+    badge.hidden = false;
     if (!data.sudo) {
       badge.textContent = "未安装 sudo";
       badge.className = "pill warn";

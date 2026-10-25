@@ -433,7 +433,9 @@ class AuthTests(ServerFixture):
     def test_sudo_check(self):
         code, body = self.post("/api/sudo/check", {})
         self.assertEqual(code, 200)
-        self.assertIn("available", json.loads(body))
+        payload = json.loads(body)
+        self.assertIn("available", payload)
+        self.assertEqual(payload["platform"], os.name)
 
     def test_post_requires_json(self):
         code, _ = self.post("/api/sudo/check", {}, content_type="text/plain")
@@ -849,6 +851,16 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("/api/status", js)
         self.assertNotIn("innerHTML", js)
         self.assertTrue((root / "style.css").read_text(encoding="utf-8").strip())
+
+    def test_sudo_badge_hidden_on_windows(self):
+        """Windows 没有 sudo 语义：前端须按 platform=nt 隐藏 sudo 徽标。"""
+        root = Path(__file__).resolve().parents[1] / "ui" / "static"
+        html = (root / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="sudo-badge"', html)
+        js = (root / "app.js").read_text(encoding="utf-8")
+        for token in ['data.platform === "nt"', "badge.hidden = true",
+                      "badge.hidden = false"]:
+            self.assertIn(token, js)
 
     def test_workspace_tabs_present(self):
         root = Path(__file__).resolve().parents[1] / "ui" / "static"
