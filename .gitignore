@@ -47,6 +47,9 @@ __pycache__/
 *.swo
 *~
 
+# Agent 工作区数据（任务记忆等，本机生成，因会话而异）
+.workbuddy/
+
 # 系统 / OS 杂项
 .DS_Store
 Thumbs.db
