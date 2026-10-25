@@ -375,10 +375,42 @@ function Request-Elevation {
 # ---------------------------------------------------------------------------
 # 配置加载
 # ---------------------------------------------------------------------------
+function ConvertFrom-ShellQuoted {
+  <#
+    按 bash source 的规则还原一个 KEY=VALUE 右侧的值。
+
+    ui.env 由 ui/schema.py render_ui_env 生成，用的是 shell 单引号转义：
+    含单引号的值写作 `'O'\''Brien'`（闭合-转义-重开）。只剥一层成对引号
+    会把单引号值解析成 `O'\''Brien`——Git 用户名带 ' 的用户在 Windows 上
+    拿到一个错的身份。双引号与裸值维持原语义：裸值在第一个"空白 + #"处
+    切行内注释，紧贴值的 # 属于值本身（与 bash source 一致）。
+  #>
+  param([Parameter(Mandatory=$true)][AllowEmptyString()][string]$Value)
+
+  if ($Value.Length -ge 2 -and $Value.StartsWith("'") -and $Value.EndsWith("'")) {
+    # 单引号内没有转义，唯一的出口是 '\'' 序列
+    $inner = $Value.Substring(1, $Value.Length - 2)
+    return $inner.Replace("'\''", "'")
+  }
+  if ($Value.Length -ge 2 -and $Value.StartsWith('"') -and $Value.EndsWith('"')) {
+    return $Value.Substring(1, $Value.Length - 2)
+  }
+  # 未加引号：空白之后的 "#" 开始行内注释，紧贴值的 "#" 属于值本身
+  $m = [regex]::Match($Value, '^(.*?)(?:\s+#.*)?$')
+  return $m.Groups[1].Value.TrimEnd()
+}
+
 function Import-UserConfig {
   <#
-    load_user_config 的移植：按 versions.env → user.env 的顺序读取 KEY=VALUE，
-    后者覆盖前者。Bash 侧用 set -a source；这里手写解析以避免执行文件内容。
+    load_user_config 的移植：按 versions.env → user.env → ui.env 的顺序读取
+    KEY=VALUE，后者覆盖前者。Bash 侧用 set -a source；这里手写解析以避免执行
+    文件内容。
+
+    三层顺序与 engine/lib/util.sh 的 load_user_config 逐项对应。ui.env 由
+    Web UI 生成（ui/schema.py render_ui_env），漏掉它会让 Windows 上 UI 改的
+    参数全部静默失效——页面显示成功，引擎读到的却是 user.env / 引擎默认值。
+    Bash 侧有 test_ui_env_precedence 锁住这条链，Windows 侧原先没有对应
+    实现也没有用例，两个引擎因此对同一份 ui.env 给出不同答案。
 
     行内注释的处理必须与 bash source 一致：`KEY=value  # 注释` 里的 # 因为
     前面是空白、自成一个词，被 bash 当作注释起点，值只取 value；而
@@ -392,7 +424,8 @@ function Import-UserConfig {
   $script:UserConfigLoaded = $true
   $files = @(
     (Join-Path $ProjectDir 'config\versions.env'),
-    (Join-Path $ProjectDir 'config\user.env')
+    (Join-Path $ProjectDir 'config\user.env'),
+    (Join-Path $ProjectDir 'config\ui.env')
   )
   foreach ($f in $files) {
     if (-not (Test-Path -LiteralPath $f)) { continue }
@@ -413,12 +446,7 @@ function Import-UserConfig {
       if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') { continue }
       $key = $Matches[1]
       $val = $Matches[2].Trim()
-      # 去掉一层成对的单/双引号（bash source 的语义）
-      if ($val.Length -ge 2) {
-        if (($val.StartsWith("'") -and $val.EndsWith("'")) -or ($val.StartsWith('"') -and $val.EndsWith('"'))) {
-          $val = $val.Substring(1, $val.Length - 2)
-        }
-      }
+      $val = ConvertFrom-ShellQuoted -Value $val
       Set-Item -Path ("Env:{0}" -f $key) -Value $val -ErrorAction SilentlyContinue
     }
   }

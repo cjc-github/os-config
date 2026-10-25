@@ -3595,6 +3595,67 @@ PS
   assert_contains "$out" "cached_query=[2.39.1]" "建好索引后查询走内存"
 }
 
+# 回归：Import-UserConfig 必须加载 config/ui.env（Web UI 写的参数层）。
+# Bash 侧 load_user_config 是 versions.env → user.env → ui.env 三层，Windows
+# 侧原先只读前两层：UI 改的参数写进 ui.env 后无人读取，页面显示成功而引擎
+# 用的还是 user.env / 引擎默认值，且没有任何提示。两个引擎因此对同一份
+# ui.env 给出不同答案。
+# 同时锁住 shell 单引号转义的还原：render_ui_env 把含 ' 的值写成
+# 'O'\''Brien'，只剥一层成对引号会得到 O'\''Brien（Git 身份整个错掉）。
+test_win_ui_env_precedence() {
+  local ps=""
+  for c in powershell pwsh; do
+    if command -v "$c" >/dev/null 2>&1; then ps="$c"; break; fi
+  done
+  if [[ -z "$ps" ]]; then
+    assert_true "无 PowerShell，跳过 Windows ui.env 用例" true
+    return 0
+  fi
+  local script="$TESTDIR/probe-uienv.ps1"
+  cat >"$script" <<'PS'
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Continue'
+$script:ProjectDir = $env:OSC_PROJECT_DIR
+. (Join-Path $script:ProjectDir 'engine\lib-win\Log.ps1')
+. (Join-Path $script:ProjectDir 'engine\lib-win\Util.ps1')
+
+# --- ConvertFrom-ShellQuoted: bash source quoting rules ---
+$cases = @(
+  @{ in = "'O'\''Brien'"; want = "O'Brien" },
+  @{ in = "'plain'"; want = 'plain' },
+  @{ in = "'a b'"; want = 'a b' },
+  @{ in = '"dq"'; want = 'dq' },
+  @{ in = 'bare'; want = 'bare' },
+  @{ in = 'bare  # trailing'; want = 'bare' },
+  @{ in = 'val#ue'; want = 'val#ue' },
+  @{ in = ''; want = '' },
+  @{ in = "''"; want = '' }
+)
+$bad = 0
+foreach ($c in $cases) {
+  $got = ConvertFrom-ShellQuoted -Value $c.in
+  if ($got -ne $c.want) { $bad++ }
+}
+Write-Host ("quote_cases_bad={0}" -f $bad)
+
+# --- three-layer precedence: versions.env -> user.env -> ui.env ---
+$dir = Join-Path $env:OSC_TEST_DIR 'cfg'
+$null = New-Item -ItemType Directory -Path (Join-Path $dir 'config') -Force
+Set-Content -LiteralPath (Join-Path $dir 'config\versions.env') -Value "SAME=versions`nONLY_V=1" -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $dir 'config\user.env')   -Value "SAME=user`nONLY_U=1" -Encoding UTF8
+Set-Content -LiteralPath (Join-Path $dir 'config\ui.env')     -Value "SAME=ui`nONLY_UI='a b'" -Encoding UTF8
+$null = Import-UserConfig -ProjectDir $dir
+Write-Host ("SAME=[{0}] ONLY_V=[{1}] ONLY_UI=[{2}]" -f $env:SAME, $env:ONLY_V, $env:ONLY_UI)
+PS
+  local out
+  out="$(OSC_PROJECT_DIR="$ROOT" OSC_TEST_DIR="$TESTDIR" \
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" 2>/dev/null)"
+  assert_contains "$out" "quote_cases_bad=0" "shell 引号还原 9 个用例全部正确"
+  assert_contains "$out" "SAME=[ui]" "ui.env 覆盖 user.env"
+  assert_contains "$out" "ONLY_V=[1]" "versions.env 仍生效"
+  assert_contains "$out" "ONLY_UI=[a b]" "ui.env 值解析（含空格）"
+}
+
 test_doctor_runs_all_checks() {
   catalog_reset
   register_pkg_tool pkg-a apt "a"
@@ -3789,6 +3850,7 @@ run_test 'Windows git 动作全生命周期'                  test_win_git_actio
 run_test 'Windows nodejs 动作全生命周期'               test_win_nodejs_action_lifecycle
 run_test 'Windows 非交互提权明确报错'                  test_win_elevation_noninteractive_errors
 run_test 'Windows winget 索引按表头解析'               test_win_winget_index_parses_real_table
+run_test 'Windows ui.env 覆盖顺序与 shell 引号还原'    test_win_ui_env_precedence
 run_test 'doctor 跑完全部检查'                         test_doctor_runs_all_checks
 run_test 'doctor 提示清单产物缺失'                     test_doctor_manifest_missing_artifact_warns
 run_test '--fix 只能配 verify'                        test_setup_fix_requires_verify
