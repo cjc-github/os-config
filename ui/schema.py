@@ -150,6 +150,14 @@ _PARAM_VALIDATORS = {
     "CODEX_VERSION": _valid_version,
     "OPENCODE_PKG": _valid_pkg_name,
     "OPENCODE_VERSION": _valid_version,
+    "GEMINI_PKG": _valid_pkg_name,
+    "GEMINI_VERSION": _valid_version,
+    "QWEN_CODE_PKG": _valid_pkg_name,
+    "QWEN_CODE_VERSION": _valid_version,
+    "COPILOT_PKG": _valid_pkg_name,
+    "COPILOT_VERSION": _valid_version,
+    "IFLOW_PKG": _valid_pkg_name,
+    "IFLOW_VERSION": _valid_version,
 }
 
 PARAM_SPECS: dict[str, dict] = {
@@ -271,6 +279,43 @@ PARAM_GROUPS: list[dict] = [
         "fields": [
             _field("OPENCODE_PKG", "npm 包名", placeholder="opencode-ai"),
             _field("OPENCODE_VERSION", "锁定版本", placeholder="1.18.18"),
+        ],
+    },
+    {
+        "id": "gemini",
+        "title": "Gemini CLI",
+        "tools": ["gemini"],
+        "fields": [
+            _field("GEMINI_PKG", "npm 包名", placeholder="@google/gemini-cli"),
+            _field("GEMINI_VERSION", "锁定版本", placeholder="0.66.0"),
+        ],
+    },
+    {
+        "id": "qwen",
+        "title": "Qwen Code",
+        "tools": ["qwen"],
+        "fields": [
+            _field("QWEN_CODE_PKG", "npm 包名",
+                   placeholder="@qwen-code/qwen-code"),
+            _field("QWEN_CODE_VERSION", "锁定版本", placeholder="0.26.2"),
+        ],
+    },
+    {
+        "id": "copilot",
+        "title": "GitHub Copilot",
+        "tools": ["copilot"],
+        "fields": [
+            _field("COPILOT_PKG", "npm 包名", placeholder="@github/copilot"),
+            _field("COPILOT_VERSION", "锁定版本", placeholder="1.0.105"),
+        ],
+    },
+    {
+        "id": "iflow",
+        "title": "iFlow CLI",
+        "tools": ["iflow"],
+        "fields": [
+            _field("IFLOW_PKG", "npm 包名", placeholder="@iflow-ai/iflow-cli"),
+            _field("IFLOW_VERSION", "锁定版本", placeholder="0.5.19"),
         ],
     },
 ]

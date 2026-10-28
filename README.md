@@ -138,7 +138,7 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 - `GIT_USER_NAME` / `GIT_USER_EMAIL`：任一为空则跳过对应项并给出 `git config --global` 提示；`verify` 阶段会校验这两项是否与期望一致。
 - `SSH_KEY_TYPE=ed25519`：默认非交互生成 ed25519 密钥。SSH **服务端**不由本文件控制——`openssh-server` 是 catalog 条目，用 `--pick openssh-server` 或写进 profile 启用（旧配置里的 `SSH_INSTALL_SERVER` 已废弃，加载时会提示）。
 - `NODE_VERSION=`：留空时装 `NODE_LTS_MAJOR` 下的最新版本，填写完整版本则精确锁定。`NVM_VERSION` 指定 nvm 自身版本，`NPM_REGISTRY` 指定 npm 源。
-- `CLAUDE_CODE_PKG` / `CLAUDE_CODE_VERSION`：Claude Code 的 npm 包名与锁定版本；`CODEX_PKG` / `CODEX_VERSION` 与 `OPENCODE_PKG` / `OPENCODE_VERSION` 同理。默认值写在 `config/versions.env`，要临时换版本可在 Web UI 的对应工具参数里改。
+- `CLAUDE_CODE_PKG` / `CLAUDE_CODE_VERSION`：Claude Code 的 npm 包名与锁定版本；Codex（`CODEX_*`）、OpenCode（`OPENCODE_*`）、Gemini（`GEMINI_*`）、Qwen（`QWEN_CODE_*`）、Copilot（`COPILOT_*`）、iFlow（`IFLOW_*`）同理。默认值写在 `config/versions.env`，要临时换版本可在 Web UI 的对应工具参数里改。
 - `JOURNALD_MAX_USE=200M`：journald 持久化上限。
 
 ## 安全性与失败处理

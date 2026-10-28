@@ -56,13 +56,16 @@ class ParamTests(unittest.TestCase):
     def test_groups(self):
         groups = {g["id"]: g for g in schema.PARAM_GROUPS}
         self.assertEqual(set(groups), {"mirrors", "proxy", "git", "ssh", "syslog",
-                                       "nodejs", "claude", "codex", "opencode"})
+                                       "nodejs", "claude", "codex", "opencode",
+                                       "gemini", "qwen", "copilot", "iflow"})
         self.assertEqual(groups["nodejs"]["tools"], ["nodejs"])
         self.assertEqual(groups["git"]["tools"], ["git"])
         self.assertIn("NPM_REGISTRY", {f["key"] for f in groups["nodejs"]["fields"]})
         self.assertIn("NVM_VERSION", {f["key"] for f in groups["nodejs"]["fields"]})
         for group, key in [("claude", "CLAUDE_CODE_PKG"), ("codex", "CODEX_PKG"),
-                           ("opencode", "OPENCODE_PKG")]:
+                           ("opencode", "OPENCODE_PKG"), ("gemini", "GEMINI_PKG"),
+                           ("qwen", "QWEN_CODE_PKG"), ("copilot", "COPILOT_PKG"),
+                           ("iflow", "IFLOW_PKG")]:
             self.assertIn(key, {f["key"] for f in groups[group]["fields"]})
 
     def test_whitelist(self):
@@ -386,7 +389,11 @@ class AuthTests(ServerFixture):
                     "NO_PROXY", "NVM_VERSION",
                     "CLAUDE_CODE_PKG", "CLAUDE_CODE_VERSION",
                     "CODEX_PKG", "CODEX_VERSION",
-                    "OPENCODE_PKG", "OPENCODE_VERSION"]:
+                    "OPENCODE_PKG", "OPENCODE_VERSION",
+                    "GEMINI_PKG", "GEMINI_VERSION",
+                    "QWEN_CODE_PKG", "QWEN_CODE_VERSION",
+                    "COPILOT_PKG", "COPILOT_VERSION",
+                    "IFLOW_PKG", "IFLOW_VERSION"]:
             self.assertIn(key, schema.PARAM_KEYS)
         schema.validate_params({"APT_UPGRADE": "true", "MIRROR_SKIP_APT": ""}, [])
         schema.validate_params({"PROXY_TEST_URL": "https://example.test/probe"}, [])
@@ -399,6 +406,14 @@ class AuthTests(ServerFixture):
         schema.validate_params({"CODEX_VERSION": "0.147.0"}, [])
         schema.validate_params({"OPENCODE_PKG": "opencode-ai"}, [])
         schema.validate_params({"OPENCODE_VERSION": "1.18.18"}, [])
+        schema.validate_params({"GEMINI_PKG": "@google/gemini-cli"}, [])
+        schema.validate_params({"GEMINI_VERSION": "0.66.0"}, [])
+        schema.validate_params({"QWEN_CODE_PKG": "@qwen-code/qwen-code"}, [])
+        schema.validate_params({"QWEN_CODE_VERSION": "0.26.2"}, [])
+        schema.validate_params({"COPILOT_PKG": "@github/copilot"}, [])
+        schema.validate_params({"COPILOT_VERSION": "1.0.105"}, [])
+        schema.validate_params({"IFLOW_PKG": "@iflow-ai/iflow-cli"}, [])
+        schema.validate_params({"IFLOW_VERSION": "0.5.19"}, [])
         schema.validate_params({"JOURNALD_MAX_USE": "200M"}, [])
         for bad in [{"APT_UPGRADE": "1"}, {"MIRROR_SKIP_APT": "yes"},
                     {"PROXY_CONNECT_TIMEOUT": "0"}, {"PROXY_MAX_TIME": "-1"},

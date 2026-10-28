@@ -187,3 +187,51 @@ deps=nodejs
 platforms=linux,win
 desc=OpenCode CLI
 group=ai
+
+[gemini]
+type=package
+backend=npm
+packages=${GEMINI_PKG:-@google/gemini-cli}
+version=$GEMINI_VERSION
+commands=gemini
+track=pin
+deps=nodejs
+platforms=linux,win
+desc=Google Gemini CLI
+group=ai
+
+[qwen]
+type=package
+backend=npm
+packages=${QWEN_CODE_PKG:-@qwen-code/qwen-code}
+version=$QWEN_CODE_VERSION
+commands=qwen
+track=pin
+deps=nodejs
+platforms=linux,win
+desc=阿里 Qwen Code CLI
+group=ai
+
+[copilot]
+type=package
+backend=npm
+packages=${COPILOT_PKG:-@github/copilot}
+version=$COPILOT_VERSION
+commands=copilot
+track=pin
+deps=nodejs
+platforms=linux,win
+desc=GitHub Copilot CLI
+group=ai
+
+[iflow]
+type=package
+backend=npm
+packages=${IFLOW_PKG:-@iflow-ai/iflow-cli}
+version=$IFLOW_VERSION
+commands=iflow
+track=pin
+deps=nodejs
+platforms=linux,win
+desc=iFlow CLI（心流）
+group=ai

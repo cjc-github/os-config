@@ -424,7 +424,7 @@ test_catalog_real() {
   catalog_load "$ROOT/catalog" >"$TESTDIR/load.out" 2>&1; rc=$?
   out="$(cat "$TESTDIR/load.out")"
   assert_rc_eq 0 "$rc" "真实 catalog 加载：$out"
-  assert_eq 56 "${#CAT_ORDER[@]}" "真实 catalog 条目数"
+  assert_eq 60 "${#CAT_ORDER[@]}" "真实 catalog 条目数"
 
   assert_eq apt "${CAT_BACKEND[curl]}" "curl backend"
   assert_eq ca-certificates "${CAT_DEPS[curl]}" "curl deps"
@@ -444,6 +444,10 @@ test_catalog_real() {
   assert_eq '@anthropic-ai/claude-code' "${CAT_PACKAGES[claude]}" "claude 默认包名"
   assert_eq '@openai/codex' "${CAT_PACKAGES[codex]}" "codex 默认包名"
   assert_eq 'opencode-ai' "${CAT_PACKAGES[opencode]}" "opencode 默认包名"
+  assert_eq '@google/gemini-cli' "${CAT_PACKAGES[gemini]}" "gemini 默认包名"
+  assert_eq '@qwen-code/qwen-code' "${CAT_PACKAGES[qwen]}" "qwen 默认包名"
+  assert_eq '@github/copilot' "${CAT_PACKAGES[copilot]}" "copilot 默认包名"
+  assert_eq '@iflow-ai/iflow-cli' "${CAT_PACKAGES[iflow]}" "iflow 默认包名"
 }
 
 test_catalog_expand_vars() {
@@ -565,7 +569,7 @@ test_profile_resolve_counts() {
   catalog_load "$ROOT/catalog" >/dev/null 2>&1
   profile_load "$ROOT/profiles" >/dev/null 2>&1
   local p
-  for p in minimal:7 ai:10 default:24 dev:52; do
+  for p in minimal:7 ai:14 default:28 dev:56; do
     local name="${p%%:*}" want="${p##*:}"
     profile_resolve "$name" >/dev/null 2>&1 || not_ok "resolve $name 失败"
     assert_eq "$want" "${#SELECTED_TOOLS[@]}" "resolve $name 数量"
@@ -2277,7 +2281,7 @@ test_list_json() {
   parsed=$("$PY_BIN" - "$out" <<'PY'
 import json,sys
 d=json.loads(sys.argv[1])
-assert len(d["catalog"])==56, len(d["catalog"])
+assert len(d["catalog"])==60, len(d["catalog"])
 by={x["id"]:x for x in d["catalog"]}
 assert by["git"]["type"]=="config" and by["git"]["action"]=="git"
 assert by["git"]["deps"]=="git-cli"
@@ -2290,9 +2294,9 @@ assert "mirrors" in profs["minimal"]["raw_tools"]
 assert "@core" in profs["minimal"]["tokens"]
 assert isinstance(profs["minimal"]["tools"], list)
 assert len(profs["minimal"]["tools"])==7
-assert len(profs["ai"]["tools"])==10
-assert len(profs["default"]["tools"])==24
-assert len(profs["dev"]["tools"])==52
+assert len(profs["ai"]["tools"])==14
+assert len(profs["default"]["tools"])==28
+assert len(profs["dev"]["tools"])==56
 assert profs["minimal"]["error"]==""
 print("ok")
 PY

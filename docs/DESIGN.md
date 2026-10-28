@@ -155,9 +155,9 @@ tools=@archive, @transfer, proxy, nodejs, @ai, syslog, nosuspend
 | profile | 直接选择 | 解析后工具数 |
 |---|---:|---:|
 | minimal | mirrors, @core, git, ssh | 7 |
-| ai | mirrors, @core, proxy, nodejs, @ai | 10 |
-| default | extends minimal + @archive/@transfer/proxy/nodejs/@ai/syslog/nosuspend | 24 |
-| dev | extends default + @development/@network/@system/@editor | 52 |
+| ai | mirrors, @core, proxy, nodejs, @ai | 14 |
+| default | extends minimal + @archive/@transfer/proxy/nodejs/@ai/syslog/nosuspend | 28 |
+| dev | extends default + @development/@network/@system/@editor | 56 |
 
 ## 五、依赖图：graph
 
