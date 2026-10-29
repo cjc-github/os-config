@@ -424,7 +424,7 @@ test_catalog_real() {
   catalog_load "$ROOT/catalog" >"$TESTDIR/load.out" 2>&1; rc=$?
   out="$(cat "$TESTDIR/load.out")"
   assert_rc_eq 0 "$rc" "真实 catalog 加载：$out"
-  assert_eq 60 "${#CAT_ORDER[@]}" "真实 catalog 条目数"
+  assert_eq 104 "${#CAT_ORDER[@]}" "真实 catalog 条目数"
 
   assert_eq apt "${CAT_BACKEND[curl]}" "curl backend"
   assert_eq ca-certificates "${CAT_DEPS[curl]}" "curl deps"
@@ -448,6 +448,10 @@ test_catalog_real() {
   assert_eq '@qwen-code/qwen-code' "${CAT_PACKAGES[qwen]}" "qwen 默认包名"
   assert_eq '@github/copilot' "${CAT_PACKAGES[copilot]}" "copilot 默认包名"
   assert_eq '@iflow-ai/iflow-cli' "${CAT_PACKAGES[iflow]}" "iflow 默认包名"
+  assert_eq apt "${CAT_BACKEND[nmap]}" "nmap backend"
+  assert_eq gnupg "${CAT_DEPS[pass]}" "pass 依赖 gnupg"
+  assert_eq nc "${CAT_COMMANDS[netcat]}" "netcat 命令名"
+  assert_eq mtr "${CAT_COMMANDS[mtr]}" "mtr 命令名（包名 mtr-tiny）"
 }
 
 test_catalog_expand_vars() {
@@ -2281,7 +2285,7 @@ test_list_json() {
   parsed=$("$PY_BIN" - "$out" <<'PY'
 import json,sys
 d=json.loads(sys.argv[1])
-assert len(d["catalog"])==60, len(d["catalog"])
+assert len(d["catalog"])==104, len(d["catalog"])
 by={x["id"]:x for x in d["catalog"]}
 assert by["git"]["type"]=="config" and by["git"]["action"]=="git"
 assert by["git"]["deps"]=="git-cli"
