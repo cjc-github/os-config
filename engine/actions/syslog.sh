@@ -45,6 +45,10 @@ action_syslog_apply() {
   _syslog_validate || return $?
   require_sudo || return 1
 
+  # --- journald drop-in 临时文件（先准备：创建失败则不做任何写盘，避免副作用）---
+  tmp="$(util_mktemp 'journald drop-in 临时文件')" || return 1
+  register_tmpfile "$tmp"
+
   # --- bat 兼容软链（batcat -> bat）---
   batcat_link="$(_syslog_bat_link)"
   if cmd_exists batcat && ! cmd_exists bat; then
@@ -55,10 +59,6 @@ action_syslog_apply() {
   elif ! cmd_exists batcat && ! cmd_exists bat; then
     log_warn "[$id] 未找到 bat/batcat（log-tools 是否已安装？），跳过软链"
   fi
-
-  # --- journald drop-in ---
-  tmp="$(util_mktemp 'journald drop-in 临时文件')" || return 1
-  register_tmpfile "$tmp"
   {
     printf '[Journal]\n'
     printf 'Storage=persistent\n'
