@@ -2395,7 +2395,7 @@ EOF
   chmod +x "$oldbin/python3"
   out=$(PATH="$oldbin:$PATH" timeout 10 bash "$ROOT/ui.sh" --no-open --port "$port" </dev/null 2>&1); rc=$?
   assert_rc_eq 1 "$rc" "python3 版本过低返回 1"
-  assert_contains "$out" "python3 >= 3.10" "版本过低提示"
+  assert_contains "$out" "python >= 3.10" "版本过低提示"
 }
 
 test_ui_ignores_and_docs() {
@@ -2487,6 +2487,13 @@ test_ui_node_suite() {
   local out rc
   if [[ -z "${NODE_BIN:-}" ]]; then
     printf 'node 不可用，跳过前端测试\n'
+    ok
+    return 0
+  fi
+  # node:test 需要 Node >= 18；旧版 node 的 --test 会直接报 bad option，
+  # 与 MSYS 跳过一样记一条通过，避免老环境把整套染红。
+  if ! "$NODE_BIN" -e 'require("node:test")' >/dev/null 2>&1; then
+    printf 'node 太旧（无 node:test），跳过前端测试\n'
     ok
     return 0
   fi

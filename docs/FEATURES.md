@@ -28,7 +28,7 @@
 
 - **catalog 条目字段** [双]：`type`、`backend`、`packages`、`version`、`commands`、`track`、`deps`、`desc`、`group`、`action`、`artifacts`、`sudo`
 - **跨平台字段** [双]：`platforms`（`linux`/`win`/`linux,win`，缺省 `linux`）、`win_backend`、`win_packages`、`win_commands`、`win_version`、`win_artifacts`、`win_deps`、`win_action`
-- **56 个工具/动作条目**，10 个分组：`core`/`transfer`/`archive`/`network`/`system`/`editor`/`development`/`config`/`runtime`/`ai`
+- **60 个工具/动作条目**，10 个分组：`core`/`transfer`/`archive`/`network`/`system`/`editor`/`development`/`config`/`runtime`/`ai`
 - **profile 机制** [双]：`extends` 继承、`@分组` 展开、`backend:包` 内联、token 去重；内置 `minimal`/`ai`/`default`/`dev` 四份
 - **配置分层** [双]：`config/versions.env` → `config/user.env` →（Web UI 场景）`config/ui.env`，后者覆盖前者
 - **变量展开** [双]：`$VAR`、`${VAR}`、`${VAR:-默认值}`；`desc`/`group`/`artifacts` 不做展开（避免二次解释）
