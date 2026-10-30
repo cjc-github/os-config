@@ -3724,6 +3724,89 @@ test_setup_export_needs_no_selection() {
   assert_not_contains "$out" "未选择任何工具" "未因缺选择而失败"
 }
 
+
+# ===========================================================================
+# 15. 数据一致性与配置健壮性（回归）
+# ===========================================================================
+
+# 回归：catalog 里 track=pin 的条目，其 version 必须在加载后非空。
+# 起因：version 写成 $XXX_VERSION（无默认值兜底）时，用户在 user.env /
+# ui.env 里把该变量置空，会让 catalog 加载整体失败——所有 install/
+# status/verify/doctor 一并不可用（单点故障放大）。
+# 这里锁住"pin 条目的 version 展开后非空"，防止新增条目时再踩这个坑。
+test_catalog_pin_versions_non_empty() {
+  catalog_load "$ROOT/catalog" >/dev/null 2>&1; rc=$?
+  assert_rc_eq 0 "$rc" "真实 catalog 加载"
+  local id n=0
+  for id in "${CAT_ORDER[@]}"; do
+    if [[ "${CAT_TRACK[$id]}" == pin ]]; then
+      n=$((n + 1))
+      assert_ne "" "${CAT_VERSION[$id]}" "pin 条目 $id 的 version 非空"
+    fi
+  done
+  assert_true "存在 track=pin 条目（用例前提）" test "$n" -gt 0
+}
+
+# 回归：把 pin 条目对应的版本变量置空，catalog 仍能加载（回落到默认）。
+# 这条锁住 catalog 里 version=${VAR:-默认} 的兜底写法。
+test_catalog_pin_version_falls_back_when_env_empty() {
+  local saved="${CODEX_VERSION:-__unset__}"
+  CODEX_VERSION=""
+  catalog_reset
+  catalog_load "$ROOT/catalog" >"$TESTDIR/load.out" 2>&1; rc=$?
+  out="$(cat "$TESTDIR/load.out")"
+  assert_rc_eq 0 "$rc" "版本变量为空时 catalog 仍能加载：$out"
+  assert_eq "0.147.0" "${CAT_VERSION[codex]}" "空版本回落到默认锁定版本"
+  if [[ "$saved" == "__unset__" ]]; then unset CODEX_VERSION; else CODEX_VERSION="$saved"; fi
+}
+
+# 回归：config/ui.env 里版本被置空时，整条命令链仍然可用。
+# 起因：用户手动清空 Web UI 的版本输入框会写入 KEY=（空值），
+# 曾经导致 catalog 加载失败、所有动词瘫痪。
+test_empty_version_in_ui_env_does_not_break_engine() {
+  local ui="$ROOT/config/ui.env" saved=""
+  [[ -f "$ui" ]] && saved="$(cat "$ui")"
+  printf '# managed by os-config web ui\nCODEX_VERSION=\n' >"$ui"
+  local out rc
+  out="$(cd "$ROOT" && bash setup.sh --list 2>&1)"; rc=$?
+  assert_rc_eq 0 "$rc" "ui.env 版本为空时 --list 仍成功"
+  assert_not_contains "$out" "catalog 加载失败" "没有 catalog 加载失败"
+  if [[ -f "$ui" ]]; then printf '%s\n' "$saved" >"$ui"; else rm -f "$ui"; fi
+}
+
+# 回归：写锁的 pid 写失败时不能留下永久死锁。
+# 起因：printf > pid 失败被 `|| true` 吞掉并返回"取锁成功"，但
+# state_locked 靠读 pid 判断归属，pid 缺失 → 锁永不释放、残留锁清理
+# 也要求 pid 非空 → 本机之后所有写操作永久失败且无自愈路径。
+test_state_lock_pid_write_failure_leaves_no_deadlock() {
+  # 覆盖写 pid 的动作，直接驱动 state_lock_acquire 的真实分支
+  state_lock_write_pid() { return 1; }
+  state_lock_acquire; rc=$?
+  assert_ne 0 "$rc" "写 pid 失败时取锁失败"
+  assert_true "失败后没有留下锁目录" test ! -d "$STATE_LOCK"
+  # 覆盖回真实实现，确认锁仍可正常获取与释放
+  # （不能 unset -f：那会把实现彻底删掉，后续调用变成 command not found）
+  state_lock_write_pid() { printf '%s\n' "$$" >"$STATE_LOCK/pid" 2>/dev/null; }
+  state_lock_acquire; rc=$?
+  assert_rc_eq 0 "$rc" "恢复正常后可取锁"
+  state_lock_release
+}
+
+# 回归：catalog 里声明的 commands 必须与包实际提供的命令名一致。
+# 起因：sysstat 实际提供 sar.sysstat（无 sar）、iotop 提供 iotop-py（无 iotop），
+# 写错会让 install 成功但 verify 永远失败。
+test_catalog_commands_match_real_binaries() {
+  catalog_load "$ROOT/catalog" >/dev/null 2>&1
+  assert_eq "sar.sysstat" "${CAT_COMMANDS[sysstat]}" "sysstat 命令名（包提供 sar.sysstat）"
+  assert_eq "iotop-py" "${CAT_COMMANDS[iotop]}" "iotop 命令名（包提供 iotop-py）"
+  assert_eq "nc" "${CAT_COMMANDS[netcat]}" "netcat 命令名（update-alternatives 提供 nc）"
+  assert_eq "unison" "${CAT_COMMANDS[unison]}" "unison 命令名（软链指向依赖包）"
+  assert_eq "http" "${CAT_COMMANDS[httpie]}" "httpie 命令名（http）"
+  assert_eq "redis-cli" "${CAT_COMMANDS[redis-tools]}" "redis-tools 命令名（redis-cli）"
+  assert_eq "psql" "${CAT_COMMANDS[postgresql-client]}" "postgresql-client 命令名（psql）"
+  assert_eq "mysql" "${CAT_COMMANDS[mysql-client]}" "mysql-client 命令名（mysql）"
+}
+
 # ===========================================================================
 run_test '所有 Shell 脚本语法'                         test_syntax
 run_test '事件 JSON 转义'                              test_events_json
@@ -3872,6 +3955,11 @@ run_test '--fix 只能配 verify'                        test_setup_fix_requires
 run_test '--output 只能配 export'                     test_setup_output_requires_export
 run_test 'doctor 不需要选择'                           test_setup_doctor_needs_no_selection
 run_test 'export 不需要选择'                           test_setup_export_needs_no_selection
+run_test 'pin 条目 version 展开后非空'            test_catalog_pin_versions_non_empty
+run_test '版本变量为空时回落到默认'               test_catalog_pin_version_falls_back_when_env_empty
+run_test 'ui.env 版本为空不瘫痪引擎'              test_empty_version_in_ui_env_does_not_break_engine
+run_test '写锁 pid 写失败不留死锁'                test_state_lock_pid_write_failure_leaves_no_deadlock
+run_test 'commands 与包实际命令一致'              test_catalog_commands_match_real_binaries
 
 if [[ -n "$FILTER" && "$MATCHED" == 0 ]]; then
   printf '没有用例匹配过滤条件：%s\n' "$FILTER" >&2

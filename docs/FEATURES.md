@@ -32,6 +32,9 @@
 - **profile 机制** [双]：`extends` 继承、`@分组` 展开、`backend:包` 内联、token 去重；内置 `minimal`/`ai`/`default`/`dev` 四份
 - **配置分层** [双]：`config/versions.env` → `config/user.env` →（Web UI 场景）`config/ui.env`，后者覆盖前者
 - **变量展开** [双]：`$VAR`、`${VAR}`、`${VAR:-默认值}`；`desc`/`group`/`artifacts` 不做展开（避免二次解释）
+- **pin 版本兜底** [双]：`track=pin` 条目的 `version` 一律写成 `${XXX_VERSION:-默认}`，
+  配置里把版本变量置空时回落到默认锁定版本；否则空值会让 catalog 整体加载失败，
+  所有动词一并不可用（单点故障放大）。Web UI 侧对应键不允许保存空值
 - **数据校验** [双]：标识符合法性、包名安全（禁空白与前导 `-`）、backend 白名单、`track=pin` 必须有 `version`、`deps` 必须已定义；拒绝键重复、段前键值、未知字段、循环继承
 - **平台门** [双]：条目 `platforms` 不含当前平台时打印“不适用于当前平台”后跳过；Linux 专属条目（mirrors/syslog/nosuspend 等）在 Windows 上自动跳过
 

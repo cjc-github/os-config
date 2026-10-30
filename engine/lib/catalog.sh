@@ -4,6 +4,8 @@
 # 不要加 set -e。
 
 declare -gA CAT_TYPE=() CAT_BACKEND=() CAT_PACKAGES=() CAT_VERSION=()
+# version 字段的原始表达式（未展开），仅用于校验失败时提示用户改哪个变量
+declare -gA CAT_VERSION_SRC=()
 declare -gA CAT_COMMANDS=() CAT_TRACK=() CAT_DEPS=() CAT_DESC=()
 declare -gA CAT_GROUP=() CAT_ACTION=() CAT_ARTIFACTS=() CAT_SUDO=()
 declare -ga CAT_ORDER=()
@@ -153,6 +155,7 @@ catalog_load_file() {
       CAT_BACKEND[$id]=""
       CAT_PACKAGES[$id]=""
       CAT_VERSION[$id]=""
+      CAT_VERSION_SRC[$id]=""
       CAT_COMMANDS[$id]=""
       CAT_TRACK[$id]=latest
       CAT_DEPS[$id]=""
@@ -187,6 +190,9 @@ catalog_load_file() {
       desc|group|artifacts|win_artifacts) ;;
       *) value="$(catalog_expand_vars "$value")" ;;
     esac
+    # version 留一份原始表达式：展开后为空时，校验报错才能指出是哪个
+    # 环境变量被设成了空值（例如 $CODEX_VERSION）。
+    [[ "$key" == "version" ]] && CAT_VERSION_SRC[$id]="$value"
     [[ -n "${seen_key[$key]+x}" ]] && { log_error "catalog 键重复：$file:$line_no（$id.$key）"; return 1; }
     seen_key[$key]=1
 
@@ -263,7 +269,13 @@ catalog_validate() {
     track="${CAT_TRACK[$id]}"
     [[ "$track" == pin || "$track" == latest ]] || { log_error "catalog [$id] track 非法：$track"; return 1; }
     if [[ "$track" == pin && -z "${CAT_VERSION[$id]}" ]]; then
-      log_error "catalog [$id] track=pin 但缺少 version"; return 1
+      # 常见成因：config/user.env 或 config/ui.env 里把该版本变量设成了空值。
+      # catalog 的 packages 用 ${VAR:-默认} 有兜底，version 没有——空值会
+      # 直接让整个 catalog 加载失败（所有工具都不可用），所以这里必须
+      # 报得足够具体，让用户知道该改哪个键。
+      local src="${CAT_VERSION_SRC[$id]:-}"
+      log_error "catalog [$id] track=pin 但缺少 version${src:+（配置项 $src 被设为空值？清空会回落到默认锁定版本）}"
+      return 1
     fi
     for dep in ${CAT_DEPS[$id]}; do
       [[ -n "${CAT_TYPE[$dep]+x}" ]] || { log_error "catalog [$id] 依赖未定义的工具：$dep"; return 1; }

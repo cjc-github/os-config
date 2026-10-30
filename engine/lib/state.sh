@@ -119,22 +119,41 @@ state_has() {
 # ---------------------------------------------------------------------------
 STATE_LOCK="${STATE_LOCK:-$STATE_DIR/.lock}"
 
+# state_lock_write_pid —— 把当前 pid 写进锁目录。
+# 抽成独立函数是为了可测：测试覆盖同名函数即可模拟"写 pid 失败"
+# 这一分支，直接驱动 state_lock_acquire 的真实代码路径。
+state_lock_write_pid() {
+  printf '%s\n' "$$" >"$STATE_LOCK/pid" 2>/dev/null
+}
+
 # state_lock_acquire —— 取得写锁。用 mkdir 保证原子性（POSIX 约定）。
 # 残留锁（持有者已退出）会被清理后重试；清理失败则报错退出。
 state_lock_acquire() {
   local pid
   state_init || return 1
   if mkdir -- "$STATE_LOCK" 2>/dev/null; then
-    printf '%s\n' "$$" >"$STATE_LOCK/pid" 2>/dev/null || true
-    return 0
+    # pid 必须写成功：state_locked 靠读 pid 判断归属，pid 缺失/为空时
+    # 锁既不会被释放、也不会被残留锁清理回收（"pid 为空永不回收"是刻意
+    # 的安全设计），写失败必须当取锁失败处理并清掉自己刚建的目录，
+    # 否则一次磁盘写失败就会让本机之后所有写操作永久失败。
+    if state_lock_write_pid; then
+      return 0
+    fi
+    log_error "无法写入锁 pid 文件，已放弃取锁并清理：$STATE_LOCK/pid"
+    rm -rf -- "$STATE_LOCK" 2>/dev/null || true
+    return 1
   fi
   pid="$(cat -- "$STATE_LOCK/pid" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
     log_warn "发现残留写锁（pid $pid 已不存在），清理后重试"
     rm -rf -- "$STATE_LOCK" 2>/dev/null || true
     if mkdir -- "$STATE_LOCK" 2>/dev/null; then
-      printf '%s\n' "$$" >"$STATE_LOCK/pid" 2>/dev/null || true
-      return 0
+      if state_lock_write_pid; then
+        return 0
+      fi
+      log_error "无法写入锁 pid 文件，已放弃取锁并清理：$STATE_LOCK/pid"
+      rm -rf -- "$STATE_LOCK" 2>/dev/null || true
+      return 1
     fi
   fi
   local who="状态未知"

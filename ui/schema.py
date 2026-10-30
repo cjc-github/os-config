@@ -122,6 +122,20 @@ def _valid_version(value: str) -> bool:
     return _VERSION_RE.fullmatch(value) is not None
 
 
+def _valid_required_version(value: str) -> bool:
+    """必须给值的版本号。
+
+    这些键会被 catalog 以 ``track=pin`` 引用（``version=$XXX_VERSION``）。
+    留空会让版本展开成空串，触发 catalog 的 "track=pin 但缺少 version"，
+    进而让**整个 catalog 加载失败**——所有 install/status/verify/doctor
+    一并不可用。普通版本键（nvm/NODE_VERSION）允许留空表示"用默认值"，
+    但 pin 版本没有"不锁版本"这个语义，所以这里直接拒绝空值。
+    """
+    if value == "":
+        return False
+    return _VERSION_RE.fullmatch(value) is not None
+
+
 _PARAM_VALIDATORS = {
     "MIRROR_APT_URL": _valid_url,
     "MIRROR_APT_PORTS_URL": _valid_url,
@@ -145,19 +159,19 @@ _PARAM_VALIDATORS = {
     "NODE_LTS_MAJOR": _valid_major,
     "NODE_VERSION": _valid_node_version,
     "CLAUDE_CODE_PKG": _valid_pkg_name,
-    "CLAUDE_CODE_VERSION": _valid_version,
+    "CLAUDE_CODE_VERSION": _valid_required_version,
     "CODEX_PKG": _valid_pkg_name,
-    "CODEX_VERSION": _valid_version,
+    "CODEX_VERSION": _valid_required_version,
     "OPENCODE_PKG": _valid_pkg_name,
-    "OPENCODE_VERSION": _valid_version,
+    "OPENCODE_VERSION": _valid_required_version,
     "GEMINI_PKG": _valid_pkg_name,
-    "GEMINI_VERSION": _valid_version,
+    "GEMINI_VERSION": _valid_required_version,
     "QWEN_CODE_PKG": _valid_pkg_name,
-    "QWEN_CODE_VERSION": _valid_version,
+    "QWEN_CODE_VERSION": _valid_required_version,
     "COPILOT_PKG": _valid_pkg_name,
-    "COPILOT_VERSION": _valid_version,
+    "COPILOT_VERSION": _valid_required_version,
     "IFLOW_PKG": _valid_pkg_name,
-    "IFLOW_VERSION": _valid_version,
+    "IFLOW_VERSION": _valid_required_version,
 }
 
 PARAM_SPECS: dict[str, dict] = {
