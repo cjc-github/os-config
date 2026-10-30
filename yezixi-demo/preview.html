@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>卡牌缩放预览 · 水浒叶子</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    h2 {
+      font-size: 16px;
+      color: #e9c97a;
+      margin: 26px 0 10px;
+      border-bottom: 1px solid rgba(201, 162, 39, .25);
+      padding-bottom: 6px;
+    }
+    .size-row {
+      display: flex;
+      gap: 28px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      padding: 6px 0 10px;
+    }
+    .size-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .size-label { font-size: 12px; color: #9a8d70; white-space: nowrap; }
+    .hand-demo { margin-bottom: 16px; }
+    .hand-label { font-size: 13px; color: #9a8d70; margin-bottom: 4px; }
+    .hand.small { --leaf-w: 76px; }
+    .hand.large { --leaf-w: 151px; }
+    .live { display: flex; flex-direction: column; gap: 10px; padding: 6px 0 28px; }
+    #live-info { font-size: 13px; color: #d8c89a; }
+    .tip { font-size: 12px; color: #7a6f58; line-height: 1.7; margin: 6px 0 0; }
+  </style>
+</head>
+<body>
+  <h1>📐 卡牌缩放预览</h1>
+  <p class="sub">
+    同一套叶子牌在 70%–140% 下的实际效果。卡面由 CSS 变量 <code>--leaf-w</code> 一处驱动，
+    字号/内边距全部 em 等比联动 —— 看看放大缩小到底受不受影响。
+  </p>
+
+  <h2>1 · 同一张牌，不同尺寸（观察文字是否溢出、留白是否协调）</h2>
+  <div class="size-row" id="size-row"></div>
+
+  <h2>2 · 四门配色（万贯 / 索子 / 文钱 / 十字）</h2>
+  <div class="size-row" id="door-row"></div>
+
+  <h2>3 · 手牌条：70% vs 140%（观察横向滚动行为）</h2>
+  <div class="hand-demo">
+    <div class="hand-label">70%（每张 76px）—— 8 张能整排放下</div>
+    <div class="hand small" id="hand-small"></div>
+  </div>
+  <div class="hand-demo">
+    <div class="hand-label">140%（每张 151px）—— 需要横向滚动</div>
+    <div class="hand large" id="hand-large"></div>
+  </div>
+
+  <h2>4 · 拖动体验</h2>
+  <div class="live">
+    <input type="range" id="live-scale" min="70" max="140" value="100">
+    <span id="live-info"></span>
+    <div id="live-card"></div>
+    <p class="tip">
+      提示：文字是矢量的，放大缩小都不会模糊；但字号低于约 8px 时观看会吃力，
+      建议可读性下限保持在卡宽 90px 左右。另外缩放只改 --leaf-w 一个变量，不触发重新渲染。
+    </p>
+  </div>
+
+  <script src="data.js"></script>
+  <script src="card-view.js"></script>
+  <script src="preview.js"></script>
+</body>
+</html>

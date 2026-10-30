@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>数据驱动卡牌系统 Demo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>🃏 数据驱动卡牌系统 · 最小可运行示例</h1>
+  <p class="sub">
+    卡牌是纯数据（<code>data.js</code>），画面由 <code>card-view.js</code> 统一渲染。
+    没填 <code>art</code> 的卡自动显示占位样式。点击卡牌可选牌，按钮可抽牌（演示动态生成卡）。
+  </p>
+
+  <div class="controls">
+    <button id="btn-draw">抽一张牌</button>
+    <span id="info">点击一张卡进行选择</span>
+  </div>
+
+  <div class="hand" id="hand"></div>
+
+  <script src="data.js"></script>
+  <script src="card-view.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>水浒叶子 · 简化对战</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>🍃 水浒叶子 · 简化对战</h1>
+  <p class="sub">
+    40 张梁山好汉叶子牌（天罡 36 星 + 4 地煞，花色为示例分配）。
+    规则：比点数，同点比门（万贯＞索子＞文钱＞十字），胜者得两张，平局各得一张。
+  </p>
+
+  <div class="controls">
+    <button id="btn-deal">再来一局</button>
+    <label class="scale-ctl">
+      卡牌大小
+      <input type="range" id="scale" min="70" max="140" value="100">
+    </label>
+    <a href="preview.html" style="color:#e9c97a;font-size:13px;">📐 缩放预览</a>
+  </div>
+
+  <div class="hand" id="hand"></div>
+
+  <div class="center" id="center"></div>
+
+  <div class="score" id="score"></div>
+  <div class="log" id="log"></div>
+
+  <script src="data.js"></script>
+  <script src="card-view.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
